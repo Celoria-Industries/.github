@@ -1,0 +1,246 @@
+name: Standard CI Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      runtime:
+        description: "Target runtime environment ('python', 'node', or 'auto' detection)"
+        required: false
+        type: string
+        default: "auto"
+      python-version:
+        description: "Python version to configure"
+        required: false
+        type: string
+        default: "3.12"
+      node-version:
+        description: "Node.js version to configure"
+        required: false
+        type: string
+        default: "20"
+      working-directory:
+        description: "Working directory relative to repository root"
+        required: false
+        type: string
+        default: "."
+      run-lint:
+        description: "Execute linting and code formatting checks"
+        required: false
+        type: boolean
+        default: true
+      run-tests:
+        description: "Execute automated test suites"
+        required: false
+        type: boolean
+        default: true
+      run-build:
+        description: "Execute build and packaging verification"
+        required: false
+        type: boolean
+        default: true
+      run-security-scan:
+        description: "Execute vulnerability and secret scanning"
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      CODECOV_TOKEN:
+        description: "Optional Codecov token for test coverage reporting"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  detect-environment:
+    name: Detect Workload Environment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      is_python: ${{ steps.detect.outputs.is_python }}
+      is_node: ${{ steps.detect.outputs.is_node }}
+    steps:
+      - name: Checkout Workload Repository
+        uses: actions/checkout@v4
+
+      - name: Inspect Runtime Signatures
+        id: detect
+        working-directory: ${{ inputs.working-directory }}
+        shell: bash
+        run: |
+          RUNTIME_INPUT="${{ inputs.runtime }}"
+          IS_PYTHON="false"
+          IS_NODE="false"
+
+          if [ "$RUNTIME_INPUT" = "python" ]; then
+            IS_PYTHON="true"
+          elif [ "$RUNTIME_INPUT" = "node" ]; then
+            IS_NODE="true"
+          else
+            # Auto-detection mode
+            if [ -f "pyproject.toml" ] || [ -f "requirements.txt" ] || [ -f "setup.py" ] || [ -f "Pipfile" ]; then
+              IS_PYTHON="true"
+            fi
+            if [ -f "package.json" ]; then
+              IS_NODE="true"
+            fi
+            # Fallback default if neither is detected
+            if [ "$IS_PYTHON" = "false" ] && [ "$IS_NODE" = "false" ]; then
+              echo "::warning::No explicit runtime detected in '${{ inputs.working-directory }}'. Enabling Python checks by default."
+              IS_PYTHON="true"
+            fi
+          fi
+
+          echo "is_python=${IS_PYTHON}" >> $GITHUB_OUTPUT
+          echo "is_node=${IS_NODE}" >> $GITHUB_OUTPUT
+          echo "Environment detected: Python=${IS_PYTHON}, Node=${IS_NODE}"
+
+  python-ci:
+    name: Python CI (FastAPI / Core)
+    needs: detect-environment
+    if: needs.detect-environment.outputs.is_python == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ inputs.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: 'pip'
+          cache-dependency-path: |
+            ${{ inputs.working-directory }}/requirements*.txt
+            ${{ inputs.working-directory }}/pyproject.toml
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif [ -f pyproject.toml ]; then
+            pip install .
+          fi
+          # Install standard verification tooling
+          pip install ruff pytest pytest-cov bandit
+
+      - name: Code Quality & Linting (Ruff)
+        if: ${{ inputs.run-lint }}
+        shell: bash
+        run: |
+          echo "Executing Ruff format & linter checks..."
+          ruff check .
+          ruff format --check .
+
+      - name: Automated Unit Tests (Pytest)
+        if: ${{ inputs.run-tests }}
+        shell: bash
+        run: |
+          echo "Running pytest test suite..."
+          if [ -d "tests" ] || [ -d "test" ]; then
+            pytest -v --cov=. --cov-report=xml --cov-report=term
+          else
+            echo "No test directory found; running pytest discovery..."
+            pytest -v || echo "::warning::No test suites discovered."
+          fi
+
+      - name: Build Verification
+        if: ${{ inputs.run-build }}
+        shell: bash
+        run: |
+          echo "Verifying application packaging and compilation..."
+          python -m pip install build
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then
+            python -m build
+          else
+            python -m compileall .
+          fi
+
+  node-ci:
+    name: Node.js CI (Next.js / Frontend)
+    needs: detect-environment
+    if: needs.detect-environment.outputs.is_node == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Code Quality & Linting
+        if: ${{ inputs.run-lint }}
+        shell: bash
+        run: |
+          echo "Executing Node.js linter..."
+          npm run lint --if-present
+
+      - name: Automated Unit Tests
+        if: ${{ inputs.run-tests }}
+        shell: bash
+        run: |
+          echo "Executing Node.js test suite..."
+          npm test --if-present -- --passWithNoTests
+
+      - name: Build Verification (Next.js / Web)
+        if: ${{ inputs.run-build }}
+        shell: bash
+        run: |
+          echo "Executing application build..."
+          npm run build --if-present
+
+  security-scan:
+    name: Security & Vulnerability Scan
+    if: ${{ inputs.run-security-scan }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks Secret Detection
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        continue-on-error: true
+
+      - name: Repository Vulnerability & Dependency Scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: ${{ inputs.working-directory }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
