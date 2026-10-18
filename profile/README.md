@@ -9,9 +9,10 @@ This repository manages organization-wide configurations, standardized developer
 ## 🏛️ Engineering Philosophy & Golden Paths
 
 At Celoria Industries, our engineering platform follows the **Golden Path** methodology:
-- **Centralized Standards, Decentralized Execution**: Service repositories focus on business logic while standard pipelines enforce security, quality, and packaging checks.
-- **Zero-Config Onboarding**: Workload repositories bootstrap continuous integration using 1-click organization workflow templates.
-- **Security by Default**: All workflows adhere to the principle of least privilege (`contents: read`), automated static vulnerability analysis, and secret leakage prevention.
+- **Full-Stack Language Ubiquity**: All backend services and web frontends are developed in TypeScript on the Node.js runtime, ensuring frictionless code sharing, unified tooling, and maximum performance.
+- **Centralized Standards, Decentralized Execution**: Service repositories focus on business logic while standard pipelines enforce quality, type safety, build integrity, and security checks.
+- **Native GitHub Advanced Security (GHAS)**: Zero dependency on fragmented third-party security vendors. We leverage first-party GitHub CodeQL SAST, GitHub Secret Scanning, and Dependency Review natively.
+- **Least-Privilege by Design**: All workflows enforce strict minimum permissions (`contents: read`).
 
 ---
 
@@ -19,10 +20,11 @@ At Celoria Industries, our engineering platform follows the **Golden Path** meth
 
 | Domain | Primary Stack | Standards & Frameworks |
 |---|---|---|
-| **Backend Services** | Python 3.12+ | FastAPI, Pydantic, Ruff, Pytest |
-| **Frontend & Web** | Node.js 20+ | Next.js, React, TypeScript, ESLint |
+| **Backend Microservices & APIs** | Node.js 20+ / TypeScript | **Fastify**, Zod / TypeBox, ESLint, Vitest |
+| **Frontend & Web Applications** | Node.js 20+ / TypeScript | **Next.js**, React, Tailwind CSS |
+| **Language & Tooling** | TypeScript 5+ | Single-language ubiquity across client & server |
 | **CI/CD Platform** | GitHub Actions | Central Reusable Workflows (`workflow_call`) |
-| **Security & Compliance** | Trivy, Gitleaks | Automated secret scanning, SAST, dependency auditing |
+| **Security & Compliance** | GitHub Advanced Security | Native CodeQL SAST, Push Protection, Secret Scanning, Dependency Review |
 
 ---
 
@@ -35,4 +37,4 @@ When creating a new repository under the `Celoria-Industries` organization:
 3. Under the **Workflows created by Celoria Industries** section, find **Celoria Standard CI/CD** and click **Configure**.
 4. Commit the generated workflow file (`.github/workflows/ci.yml`).
 
-For comprehensive parameter references, custom runtime overrides, and local setup, refer to the [Internal Developer Documentation](https://github.com/Celoria-Industries/.github/blob/main/README.md).
+For comprehensive parameter references, monorepo configurations, and local setup, refer to the [Internal Developer Documentation](https://github.com/Celoria-Industries/.github/blob/main/README.md).

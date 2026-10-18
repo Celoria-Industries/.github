@@ -1,16 +1,15 @@
 {
   "name": "Celoria Standard CI/CD",
-  "description": "Standardized Celoria Industries CI pipeline for Python (FastAPI) and Node.js (Next.js) workloads, featuring automated linting, test suites, build verification, and security scanning.",
+  "description": "Standardized Node.js & TypeScript pipeline for Fastify backend APIs and Next.js web applications, integrated directly with GitHub Advanced Security (CodeQL SAST & Dependency Review).",
   "iconName": "standard-workload-ci",
   "categories": [
-    "Python",
     "Node.js",
+    "TypeScript",
+    "GitHub Advanced Security",
     "Continuous Integration"
   ],
   "filePatterns": [
     "package.json$",
-    "requirements.txt$",
-    "pyproject.toml$",
-    "setup.py$"
+    "tsconfig.json$"
   ]
 }

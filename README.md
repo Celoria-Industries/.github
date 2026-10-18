@@ -1,22 +1,24 @@
 # Celoria Industries — Central `.github` Repository
 
-This repository serves as the organization-wide configuration and workflow hub for **Celoria Industries**. It centralizes continuous integration and delivery (CI/CD) pipelines into reusable GitHub Actions workflows, provides 1-click starter workflow templates for newly provisioned workload repositories, and enforces organizational quality and security standards.
+This repository serves as the organization-wide configuration and workflow hub for **Celoria Industries**. It centralizes continuous integration and delivery (CI/CD) pipelines into reusable GitHub Actions workflows, provides 1-click starter workflow templates for newly provisioned workload repositories, and enforces organizational quality and native security standards.
 
 ---
 
 ## 📑 Table of Contents
 
 - [Overview & Architecture](#overview--architecture)
+- [Why Node.js / TypeScript Ubiquity?](#why-nodejs--typescript-ubiquity)
+- [Native GitHub Advanced Security (GHAS)](#native-github-advanced-security-ghas)
 - [Quickstart: 1-Click Starter Workflow](#quickstart-1-click-starter-workflow)
 - [Manual Setup: Caller Workflow Example](#manual-setup-caller-workflow-example)
 - [Workflow Specification: `standard-ci.yml`](#workflow-specification-standard-ciyml)
   - [Inputs Reference](#inputs-reference)
   - [Secrets Reference](#secrets-reference)
 - [Required GitHub Repository Settings](#required-github-repository-settings)
-- [Advanced Usage & Common Scenarios](#advanced-usage--common-scenarios)
-  - [FastAPI Backend Service](#1-fastapi-backend-service)
-  - [Next.js Web Application](#2-nextjs-web-application)
-  - [Monorepo / Subdirectory Workload](#3-monorepo--subdirectory-workload)
+- [Workload Examples](#workload-examples)
+  - [1. Fastify Backend Microservice](#1-fastify-backend-microservice)
+  - [2. Next.js Web Application](#2-nextjs-web-application)
+  - [3. Monorepo / Subdirectory Workload](#3-monorepo--subdirectory-workload)
 - [Security & Governance](#security--governance)
 
 ---
@@ -26,23 +28,36 @@ This repository serves as the organization-wide configuration and workflow hub f
 Instead of duplicating hundred-line workflow files across every workload repository, Celoria Industries maintains a **single source of truth** in this repository.
 
 ```
-Workload Repository (e.g. api-service)
+Workload Repository (e.g. auth-service or web-portal)
 └── .github/workflows/ci.yml
          │
          │ (workflow_call + secrets: inherit)
          ▼
 Celoria-Industries/.github
 └── .github/workflows/standard-ci.yml
-         ├── Detect Environment (Python / Node / Auto)
-         ├── Python CI (FastAPI, Ruff linting, Pytest, packaging)
-         ├── Node.js CI (Next.js, ESLint, Unit tests, Next build)
-         └── Security Scanner (Gitleaks, Trivy vulnerability audits)
+         ├── Node CI (Setup, Cache, Linting, Typecheck, Unit Tests, Build)
+         ├── GHAS CodeQL SAST Analysis (Deep semantic code security scan)
+         └── GHAS Dependency Review & Audit (PR supply-chain vulnerability gate)
 ```
 
-### Key Benefits
-- **Zero Drift**: Security updates, dependency updates, and linting standard improvements apply instantly across all org repositories.
-- **Least Privilege**: Default permissions are scoped strictly to `contents: read`.
-- **Fast Onboarding**: Developers can initialize a production-ready CI pipeline in seconds.
+---
+
+## Why Node.js / TypeScript Ubiquity?
+
+Celoria Industries standardizes on **Node.js + TypeScript** across both backend and frontend systems:
+- **Fastify for Backend APIs**: Delivers extreme throughput and low overhead, outperforming traditional synchronous and asynchronous alternatives while providing full schema-based validation (TypeBox / JSON Schema).
+- **Next.js for Frontend Web**: Server-side rendering, React Server Components, and seamless modern UX.
+- **Language Ubiquity**: DTOs, schemas, utility libraries, and types are shared seamlessly across client and server with zero impedance mismatch.
+
+---
+
+## Native GitHub Advanced Security (GHAS)
+
+We rely strictly on native GitHub features rather than external SaaS security scanners:
+1. **GitHub CodeQL SAST**: Performs deep semantic analysis (`javascript-typescript`) using official security queries (`security-extended`, `security-and-quality`). Results publish directly into the repository's **Security → Code scanning alerts** tab.
+2. **GitHub Secret Scanning & Push Protection**: Natively prevents credentials and private keys from entering the git commit history.
+3. **GitHub Dependency Review**: Evaluates pull requests against the GitHub Advisory Database to block vulnerable dependencies before merge.
+4. **Native npm Audit**: Inspects dependencies for known security advisories.
 
 ---
 
@@ -56,7 +71,7 @@ When bootstrapping a new workload repository inside the `Celoria-Industries` org
 4. Click **Configure**.
 5. Commit the template to your repository's default branch (`main`).
 
-Your repository will automatically link to the centralized pipeline.
+Your repository is now protected by organization-standard CI and GHAS security.
 
 ---
 
@@ -81,14 +96,14 @@ jobs:
     name: Celoria Standard CI
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
-      runtime: 'auto'               # 'auto', 'python', or 'node'
-      python-version: '3.12'
       node-version: '20'
       working-directory: '.'
       run-lint: true
+      run-typecheck: true
       run-tests: true
       run-build: true
-      run-security-scan: true
+      enable-codeql: true
+      enable-dependency-review: true
     secrets: inherit
 ```
 
@@ -103,14 +118,14 @@ jobs:
 
 | Input | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `runtime` | `string` | `'auto'` | No | Target runtime environment: `'python'`, `'node'`, or `'auto'` (inspects project manifest files). |
-| `python-version` | `string` | `'3.12'` | No | Python version to install and configure via `actions/setup-python@v5`. |
-| `node-version` | `string` | `'20'` | No | Node.js version to install and configure via `actions/setup-node@v4`. |
+| `node-version` | `string` | `'20'` | No | Node.js LTS version to install and configure via `actions/setup-node@v4`. |
 | `working-directory`| `string` | `'.'` | No | Path relative to repository root containing the application codebase. |
-| `run-lint` | `boolean` | `true` | No | Whether to run linter checks (Ruff for Python, ESLint / `npm run lint` for Node). |
-| `run-tests` | `boolean` | `true` | No | Whether to execute automated tests (Pytest with coverage for Python, Jest/Vitest for Node). |
-| `run-build` | `boolean` | `true` | No | Whether to verify application build and packaging (`python -m build` or `npm run build`). |
-| `run-security-scan`| `boolean` | `true` | No | Whether to execute secret detection (Gitleaks) and filesystem vulnerability audits (Trivy). |
+| `run-lint` | `boolean` | `true` | No | Whether to execute linter scripts (`npm run lint --if-present`). |
+| `run-typecheck` | `boolean` | `true` | No | Whether to execute TypeScript type checking (`tsc --noEmit`). |
+| `run-tests` | `boolean` | `true` | No | Whether to execute automated tests (`npm test --if-present`). |
+| `run-build` | `boolean` | `true` | No | Whether to verify application build (`npm run build --if-present`). |
+| `enable-codeql` | `boolean` | `true` | No | Whether to run GitHub Advanced Security CodeQL SAST analysis. |
+| `enable-dependency-review` | `boolean` | `true` | No | Whether to run GHAS Dependency Review on pull requests and npm audit. |
 
 ### Secrets Reference
 
@@ -118,32 +133,35 @@ Workload repositories should invoke the workflow with `secrets: inherit`.
 
 | Secret | Required | Description |
 |---|---|---|
-| `CODECOV_TOKEN` | Optional | API token for reporting test coverage results to Codecov. |
+| `CODECOV_TOKEN` | Optional | API token for reporting test coverage results to Codecov (if applicable). |
 
 ---
 
 ## Required GitHub Repository Settings
 
-> [!IMPORTANT]
-> If this `.github` repository is configured as **Private** or **Internal**, GitHub blocks other repositories in the organization from calling its reusable workflows by default.
+### 1. Enable Reusable Workflow Access (if repository is private)
+If this `.github` repository is configured as **Private** or **Internal**, GitHub blocks other repositories in the organization from calling its reusable workflows by default.
 
-To enable cross-repository workflow access:
-
-1. In this repository (`Celoria-Industries/.github`), go to **Settings**.
+1. In this repository (`Celoria-Industries/.github`), navigate to **Settings**.
 2. In the left navigation, select **Actions** → **General**.
-3. Scroll down to the **Access** section.
-4. Select **Accessible from repositories in the 'Celoria-Industries' organization** (or select specific workload repositories).
+3. Scroll down to **Access**.
+4. Select **Accessible from repositories in the 'Celoria-Industries' organization**.
 5. Click **Save**.
 
-![GitHub Actions Workflow Access Settings](https://docs.github.com/assets/cb-32598/images/help/settings/actions-access-settings.png)
+### 2. Enable GitHub Advanced Security (GHAS) in Workload Repos
+1. In the target workload repository, navigate to **Settings** → **Code security and analysis**.
+2. Ensure the following are enabled:
+   - **GitHub Advanced Security**
+   - **Dependency graph**
+   - **Dependabot alerts & Dependabot security updates**
+   - **Secret scanning** and **Push protection**
+   - **Code scanning** (CodeQL will populate results via SARIF from this workflow)
 
 ---
 
-## Advanced Usage & Common Scenarios
+## Workload Examples
 
-### 1. FastAPI Backend Service
-
-For a pure Python FastAPI backend repository:
+### 1. Fastify Backend Microservice
 
 ```yaml
 name: Backend CI
@@ -161,19 +179,18 @@ jobs:
   backend-ci:
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
-      runtime: 'python'
-      python-version: '3.12'
+      node-version: '20'
+      run-typecheck: true
       run-tests: true
-      run-security-scan: true
+      run-build: true
+      enable-codeql: true
     secrets: inherit
 ```
 
 ### 2. Next.js Web Application
 
-For a Next.js frontend repository:
-
 ```yaml
-name: Web Frontend CI
+name: Frontend CI
 
 on:
   push:
@@ -188,18 +205,19 @@ jobs:
   frontend-ci:
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
-      runtime: 'node'
       node-version: '20'
+      run-lint: true
       run-build: true
+      enable-codeql: true
     secrets: inherit
 ```
 
 ### 3. Monorepo / Subdirectory Workload
 
-If your service code is situated in a subdirectory (such as `apps/api` or `services/web`):
+If your Fastify service or Next.js app is located in a subfolder (e.g., `services/api` or `apps/web`):
 
 ```yaml
-name: Monorepo Service CI
+name: Subdirectory Workload CI
 
 on:
   push:
@@ -215,7 +233,7 @@ jobs:
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
       working-directory: 'services/api'
-      runtime: 'python'
+      node-version: '20'
     secrets: inherit
 ```
 
@@ -223,6 +241,6 @@ jobs:
 
 ## Security & Governance
 
-- **Permissions**: Root permissions in `standard-ci.yml` default to `contents: read`. Elevated permissions are declared strictly per-job when required (e.g., `security-events: write` for vulnerability report uploads).
+- **Permissions**: Root permissions in `standard-ci.yml` default to `contents: read`. Elevated permissions are declared strictly per-job where required (`security-events: write` for CodeQL analysis, `pull-requests: write` for Dependency Review PR comments).
 - **Secrets Isolation**: No hardcoded credentials exist in workflows. All sensitive keys are passed dynamically through GitHub Secrets inheritance.
 - **Workflow Versioning**: Workload repositories can pin to `@main` for automatic continuous updates, or pin to a tagged release (e.g. `@v1`, `@v1.2.0`) or commit SHA for immutable pipelines.
