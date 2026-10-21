@@ -96,14 +96,14 @@ jobs:
     name: Celoria Standard CI
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
-      node-version: '20'
+      node-version: '26'
       working-directory: '.'
       run-lint: true
       run-typecheck: true
       run-tests: true
       run-build: true
-      enable-codeql: true
-      enable-dependency-review: true
+      enable-codeql: false
+      enable-dependency-review: false
     secrets: inherit
 ```
 
@@ -118,14 +118,14 @@ jobs:
 
 | Input | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `node-version` | `string` | `'20'` | No | Node.js LTS version to install and configure via `actions/setup-node@v4`. |
+| `node-version` | `string` | `'26'` | No | Node.js version to install and configure via `actions/setup-node@v7`. |
 | `working-directory`| `string` | `'.'` | No | Path relative to repository root containing the application codebase. |
 | `run-lint` | `boolean` | `true` | No | Whether to execute linter scripts (`npm run lint --if-present`). |
 | `run-typecheck` | `boolean` | `true` | No | Whether to execute TypeScript type checking (`tsc --noEmit`). |
 | `run-tests` | `boolean` | `true` | No | Whether to execute automated tests (`npm test --if-present`). |
 | `run-build` | `boolean` | `true` | No | Whether to verify application build (`npm run build --if-present`). |
-| `enable-codeql` | `boolean` | `true` | No | Whether to run GitHub Advanced Security CodeQL SAST analysis. |
-| `enable-dependency-review` | `boolean` | `true` | No | Whether to run GHAS Dependency Review on pull requests and npm audit. |
+| `enable-codeql` | `boolean` | `false` | No | Whether to run GitHub Advanced Security CodeQL SAST analysis. Enable after CodeQL/code scanning is available for the repository. |
+| `enable-dependency-review` | `boolean` | `false` | No | Whether to run GHAS Dependency Review on pull requests. Enable after the dependency graph is available for the repository. Native `npm audit` runs independently in Node.js CI. |
 
 ### Secrets Reference
 
@@ -149,6 +149,8 @@ If this `.github` repository is configured as **Private** or **Internal**, GitHu
 5. Click **Save**.
 
 ### 2. Enable GitHub Advanced Security (GHAS) in Workload Repos
+CodeQL and Dependency Review are disabled by default so CI continues to work before the organization enables the required security features. After they are enabled, set the corresponding reusable-workflow inputs to `true`.
+
 1. In the target workload repository, navigate to **Settings** → **Code security and analysis**.
 2. Ensure the following are enabled:
    - **GitHub Advanced Security**
@@ -179,11 +181,11 @@ jobs:
   backend-ci:
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
-      node-version: '20'
+      node-version: '26'
       run-typecheck: true
       run-tests: true
       run-build: true
-      enable-codeql: true
+      enable-codeql: false
     secrets: inherit
 ```
 
@@ -205,10 +207,10 @@ jobs:
   frontend-ci:
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
-      node-version: '20'
+      node-version: '26'
       run-lint: true
       run-build: true
-      enable-codeql: true
+      enable-codeql: false
     secrets: inherit
 ```
 
@@ -233,7 +235,7 @@ jobs:
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
       working-directory: 'services/api'
-      node-version: '20'
+      node-version: '26'
     secrets: inherit
 ```
 
@@ -241,6 +243,7 @@ jobs:
 
 ## Security & Governance
 
-- **Permissions**: Root permissions in `standard-ci.yml` default to `contents: read`. Elevated permissions are declared strictly per-job where required (`security-events: write` for CodeQL analysis, `pull-requests: write` for Dependency Review PR comments).
+- **Permissions**: Root permissions in `standard-ci.yml` default to `contents: read`. The reusable workflow requests elevated permissions per job only when those jobs are enabled.
+- **Opt-in security permissions**: When enabling CodeQL, grant `actions: read` and `security-events: write` in the caller workflow. When enabling Dependency Review, also grant `pull-requests: write` for PR comments. The reusable workflow cannot elevate permissions beyond those granted by the caller.
 - **Secrets Isolation**: No hardcoded credentials exist in workflows. All sensitive keys are passed dynamically through GitHub Secrets inheritance.
 - **Workflow Versioning**: Workload repositories can pin to `@main` for automatic continuous updates, or pin to a tagged release (e.g. `@v1`, `@v1.2.0`) or commit SHA for immutable pipelines.

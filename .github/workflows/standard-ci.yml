@@ -4,10 +4,10 @@ on:
   workflow_call:
     inputs:
       node-version:
-        description: "Node.js version to configure (e.g. '20', '22')"
+        description: "Node.js version to configure (e.g. '22', '24', '26')"
         required: false
         type: string
-        default: "20"
+        default: "26"
       working-directory:
         description: "Working directory relative to repository root"
         required: false
@@ -37,12 +37,12 @@ on:
         description: "Enable GitHub Advanced Security CodeQL static analysis (SAST)"
         required: false
         type: boolean
-        default: true
+        default: false
       enable-dependency-review:
         description: "Enable GitHub Advanced Security Dependency Review for pull requests"
         required: false
         type: boolean
-        default: true
+        default: false
     secrets:
       CODECOV_TOKEN:
         description: "Optional Codecov token for test coverage reporting"
@@ -62,10 +62,10 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js ${{ inputs.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
@@ -81,6 +81,12 @@ jobs:
             echo "package-lock.json not found; running npm install..."
             npm install
           fi
+
+      - name: Run Native npm Audit
+        shell: bash
+        run: |
+          echo "Running native npm audit for known vulnerabilities..."
+          npm audit --audit-level=high || echo "::warning::High or critical vulnerabilities detected by npm audit."
 
       - name: Code Quality & Linting
         if: ${{ inputs.run-lint }}
@@ -119,6 +125,7 @@ jobs:
     if: ${{ inputs.enable-codeql }}
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       security-events: write
     defaults:
@@ -126,16 +133,16 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: 'javascript-typescript'
           queries: security-extended,security-and-quality
 
       - name: Set up Node.js ${{ inputs.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
@@ -151,13 +158,13 @@ jobs:
           fi
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:javascript-typescript"
 
   dependency-review:
     name: GHAS Dependency Review & Security Audit
-    if: ${{ inputs.enable-dependency-review }}
+    if: ${{ inputs.enable-dependency-review && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -167,16 +174,9 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run GitHub Dependency Review (Pull Requests)
-        if: github.event_name == 'pull_request'
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: high
-
-      - name: Run Native npm Audit
-        shell: bash
-        run: |
-          echo "Running native npm audit for known vulnerabilities..."
-          npm audit --audit-level=high || echo "::warning::High or critical vulnerabilities detected by npm audit."

@@ -14,12 +14,12 @@ jobs:
     name: Celoria Standard CI
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
-      node-version: '20'
+      node-version: '26'
       working-directory: '.'
       run-lint: true
       run-typecheck: true
       run-tests: true
       run-build: true
-      enable-codeql: true
-      enable-dependency-review: true
+      enable-codeql: false
+      enable-dependency-review: false
     secrets: inherit
