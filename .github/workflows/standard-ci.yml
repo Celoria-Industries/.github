@@ -29,7 +29,7 @@ on:
         type: boolean
         default: true
       run-build:
-        description: "Execute build and packaging verification (Fastify / Next.js)"
+        description: "Execute application build and packaging verification"
         required: false
         type: boolean
         default: true
@@ -53,7 +53,7 @@ permissions:
 
 jobs:
   node-ci:
-    name: Node.js CI (Fastify / Next.js)
+    name: Node.js CI
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -84,9 +84,7 @@ jobs:
 
       - name: Run Native npm Audit
         shell: bash
-        run: |
-          echo "Running native npm audit for known vulnerabilities..."
-          npm audit --audit-level=high || echo "::warning::High or critical vulnerabilities detected by npm audit."
+        run: npm audit --audit-level=high
 
       - name: Code Quality & Linting
         if: ${{ inputs.run-lint }}
@@ -117,7 +115,7 @@ jobs:
         if: ${{ inputs.run-build }}
         shell: bash
         run: |
-          echo "Executing application build (Fastify server / Next.js app)..."
+          echo "Executing application build..."
           npm run build --if-present
 
   codeql-analysis:

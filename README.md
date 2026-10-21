@@ -128,7 +128,7 @@ jobs:
 | `run-tests` | `boolean` | `true` | No | Whether to execute automated tests (`npm test --if-present`). |
 | `run-build` | `boolean` | `true` | No | Whether to verify application build (`npm run build --if-present`). |
 | `enable-codeql` | `boolean` | `false` | No | Whether to run GitHub Advanced Security CodeQL SAST analysis. Enable after CodeQL/code scanning is available for the repository. |
-| `enable-dependency-review` | `boolean` | `false` | No | Whether to run GHAS Dependency Review on pull requests. Enable after the dependency graph is available for the repository. Native `npm audit` runs independently in Node.js CI. |
+| `enable-dependency-review` | `boolean` | `false` | No | Whether to run GHAS Dependency Review on pull requests. Enable after the dependency graph is available for the repository. Native `npm audit` runs independently in Node.js CI and fails on high or critical findings. |
 
 ### Secrets Reference
 
