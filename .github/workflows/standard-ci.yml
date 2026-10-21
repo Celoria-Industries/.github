@@ -13,6 +13,10 @@ on:
         required: false
         type: string
         default: "."
+      validation-script:
+        description: "Required repository-owned validation script path, relative to working-directory"
+        required: true
+        type: string
       run-lint:
         description: "Execute linting and code formatting checks"
         required: false
@@ -117,6 +121,45 @@ jobs:
         run: |
           echo "Executing application build..."
           npm run build --if-present
+
+  integration-validation:
+    name: Required Validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run Repository Validation
+        shell: bash
+        env:
+          VALIDATION_SCRIPT: ${{ inputs.validation-script }}
+        run: |
+          if [[ -z "$VALIDATION_SCRIPT" || ! -f "$VALIDATION_SCRIPT" ]]; then
+            echo "::error::Validation script not found: $VALIDATION_SCRIPT"
+            exit 1
+          fi
+          bash -- "$VALIDATION_SCRIPT"
 
   codeql-analysis:
     name: GHAS CodeQL SAST Analysis

@@ -19,6 +19,7 @@ jobs:
     with:
       node-version: '26'
       working-directory: '.'
+      validation-script: 'scripts/ci-validation.sh'
       run-lint: true
       run-typecheck: true
       run-tests: true

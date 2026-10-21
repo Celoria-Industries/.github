@@ -101,6 +101,7 @@ jobs:
     with:
       node-version: '26'
       working-directory: '.'
+      validation-script: 'scripts/ci-validation.sh'
       run-lint: true
       run-typecheck: true
       run-tests: true
@@ -123,6 +124,7 @@ jobs:
 |---|---|---|---|---|
 | `node-version` | `string` | `'26'` | No | Node.js version to install and configure via `actions/setup-node@v7`. |
 | `working-directory`| `string` | `'.'` | No | Path relative to repository root containing the application codebase. |
+| `validation-script` | `string` | — | Yes | Required repository-owned validation script, relative to `working-directory`. The reusable workflow runs it in the stable `Required Validation` job, which can be enforced as a branch-protection check. |
 | `run-lint` | `boolean` | `true` | No | Whether to execute linter scripts (`npm run lint --if-present`). |
 | `run-typecheck` | `boolean` | `true` | No | Whether to execute TypeScript type checking (`tsc --noEmit`). |
 | `run-tests` | `boolean` | `true` | No | Whether to execute automated tests (`npm test --if-present`). |
@@ -162,6 +164,9 @@ CodeQL and Dependency Review are disabled by default so CI continues to work bef
    - **Secret scanning** and **Push protection**
    - **Code scanning** (CodeQL will populate results via SARIF from this workflow)
 
+### 3. Require the Shared Validation Check
+To enforce repository-specific integration or frontend validation, add **`Celoria Standard CI / Required Validation`** as a required status check in the workload repository's branch protection or ruleset. The reusable workflow always runs the caller-provided `validation-script`; a missing script or failed command fails this check.
+
 ---
 
 ## Workload Examples
@@ -188,6 +193,7 @@ jobs:
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
       node-version: '26'
+      validation-script: 'scripts/ci-validation.sh'
       run-typecheck: true
       run-tests: true
       run-build: true
@@ -217,6 +223,7 @@ jobs:
     uses: Celoria-Industries/.github/.github/workflows/standard-ci.yml@main
     with:
       node-version: '26'
+      validation-script: 'scripts/ci-validation.sh'
       run-lint: true
       run-build: true
       enable-codeql: false
@@ -248,6 +255,7 @@ jobs:
     with:
       working-directory: 'services/api'
       node-version: '26'
+      validation-script: 'scripts/ci-validation.sh'
     secrets: inherit
 ```
 
