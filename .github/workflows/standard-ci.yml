@@ -53,7 +53,7 @@ permissions:
 
 jobs:
   node-ci:
-    name: Node.js CI
+    name: CI
     runs-on: ubuntu-latest
     permissions:
       contents: read
