@@ -89,7 +89,10 @@ on:
     branches: [ main ]
 
 permissions:
+  actions: read
   contents: read
+  pull-requests: write
+  security-events: write
 
 jobs:
   ci:
@@ -149,7 +152,7 @@ If this `.github` repository is configured as **Private** or **Internal**, GitHu
 5. Click **Save**.
 
 ### 2. Enable GitHub Advanced Security (GHAS) in Workload Repos
-CodeQL and Dependency Review are disabled by default so CI continues to work before the organization enables the required security features. After they are enabled, set the corresponding reusable-workflow inputs to `true`.
+CodeQL and Dependency Review are disabled by default so CI continues to work before the organization enables the required security features. The caller must still grant the permissions requested by the reusable workflow, even when these optional jobs are disabled. After the features are enabled, set the corresponding reusable-workflow inputs to `true`.
 
 1. In the target workload repository, navigate to **Settings** → **Code security and analysis**.
 2. Ensure the following are enabled:
@@ -175,7 +178,10 @@ on:
     branches: [ main ]
 
 permissions:
+  actions: read
   contents: read
+  pull-requests: write
+  security-events: write
 
 jobs:
   backend-ci:
@@ -201,7 +207,10 @@ on:
     branches: [ main ]
 
 permissions:
+  actions: read
   contents: read
+  pull-requests: write
+  security-events: write
 
 jobs:
   frontend-ci:
@@ -228,7 +237,10 @@ on:
     branches: [ main ]
 
 permissions:
+  actions: read
   contents: read
+  pull-requests: write
+  security-events: write
 
 jobs:
   service-ci:
