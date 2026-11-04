@@ -1,0 +1,83 @@
+name: Container Image (Podman)
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image path without registry, e.g. 'celoria-industries/frontend-template'"
+        required: true
+        type: string
+      context:
+        description: "Build context, relative to repository root"
+        required: false
+        type: string
+        default: "."
+      containerfile:
+        description: "Containerfile path, relative to the context"
+        required: false
+        type: string
+        default: "Containerfile"
+      registry:
+        description: "Target registry"
+        required: false
+        type: string
+        default: "ghcr.io"
+      push:
+        description: "Push the image after building (build-only when false)"
+        required: false
+        type: boolean
+        default: false
+      platforms:
+        description: "Comma-separated target platforms"
+        required: false
+        type: string
+        default: "linux/amd64"
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Build image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v7
+
+      - name: Install QEMU for cross-architecture builds
+        if: ${{ inputs.platforms != 'linux/amd64' }}
+        run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+
+      - name: Build
+        env:
+          IMAGE: ${{ inputs.registry }}/${{ inputs.image-name }}
+          CONTEXT: ${{ inputs.context }}
+          CONTAINERFILE: ${{ inputs.containerfile }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          podman build \
+            --platform "$PLATFORMS" \
+            --manifest "$IMAGE:$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -f "$CONTEXT/$CONTAINERFILE" \
+            "$CONTEXT"
+
+      - name: Log in to registry
+        if: ${{ inputs.push }}
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | podman login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Push
+        if: ${{ inputs.push }}
+        env:
+          IMAGE: ${{ inputs.registry }}/${{ inputs.image-name }}
+        run: |
+          set -euo pipefail
+          podman manifest push --all "$IMAGE:$GITHUB_SHA" "docker://$IMAGE:$GITHUB_SHA"

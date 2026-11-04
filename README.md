@@ -142,6 +142,11 @@ Workload repositories should invoke the workflow with `secrets: inherit`.
 
 ---
 
+## Container Images & Standards
+
+- `container-image.yml` is a reusable workflow that builds a `Containerfile` with Podman and optionally pushes to GHCR (inputs: `image-name`, `context`, `containerfile`, `registry`, `push`, `platforms`). A starter template is provided.
+- Container conventions, including the `/-/livez`, `/-/readyz`, `/-/healthz` and `/-/metricsz` probe standard, live in [`standards/containers.md`](standards/containers.md).
+
 ## Required GitHub Repository Settings
 
 ### 1. Enable Reusable Workflow Access (if repository is private)
