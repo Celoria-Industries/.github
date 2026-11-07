@@ -1,6 +1,6 @@
 {
   "name": "Celoria Container Image (Podman)",
-  "description": "Builds a Containerfile with Podman and pushes to GHCR on the default branch.",
+  "description": "Builds a Containerfile with Podman and publishes to ECR with ECR-backed caching.",
   "iconName": "standard-workload-ci",
   "categories": ["Continuous Integration", "Containers"],
   "filePatterns": ["Containerfile$"]
