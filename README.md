@@ -146,6 +146,14 @@ Workload repositories should invoke the workflow with `secrets: inherit`.
 
 - `container-image.yml` builds a `Containerfile` with Podman and publishes SHA-tagged images to ECR. A starter template is provided. Publishing requires `image-name`, `cache-repository`, `aws-region`, and `ecr-push-role-arn`; the caller grants `id-token: write` and the role trusts only the caller's `main` branch. The image repository should use immutable tags; the separate, mutable cache repository must be provisioned in the same account and region, with the role authorized to pull and push both repositories. Cache images include intermediate build stages: keep secrets out of the build context and container layers. Main-branch publishing uses `--cache-from` and `--cache-to`; pull requests build without AWS credentials or remote caching. The optional `commit` input publishes a full SHA that is an ancestor of the triggering main commit, for initial rollout or recovery. Re-publishing an existing SHA to an immutable repository fails.
 - `playwright.yml` runs `npm run test:e2e` with Chromium and uploads Playwright reports. Call it with `node-version` and optional `working-directory`; callers need only `contents: read`.
+- `dependabot-auto-merge.yml` enables squash auto-merge for Dependabot
+  minor and patch updates. A caller can use `pull_request_target` with a
+  Dependabot-author guard and grant `contents: write` and
+  `pull-requests: write`. The reusable job never checks out or executes
+  pull-request code. Enable repository auto-merge and require the appropriate
+  CI checks on the target branch first; otherwise a pull request could merge
+  without waiting for CI. Existing pull requests must be reopened or updated
+  to trigger the caller.
 - The ECR workflow replaces the old GHCR-based interface: migrate existing callers to the new inputs and provision cache repositories and OIDC permissions before switching them to `@main`. Older callers pinned to a different ref are unaffected until updated.
 - Container conventions, including the `/-/livez`, `/-/readyz`, `/-/healthz` and `/-/metricsz` probe standard, live in [`standards/containers.md`](standards/containers.md).
 - Service-to-service authentication (IAM/SigV4 via Pod Identity, no shared long-lived keys) is specified in [`standards/service-auth.md`](standards/service-auth.md).
