@@ -1,0 +1,24 @@
+name: Reusable workflow tests
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/container-image.yml"
+      - "tests/test_container_workflow.py"
+      - ".github/workflows/workflow-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/container-image.yml"
+      - "tests/test_container_workflow.py"
+      - ".github/workflows/workflow-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v

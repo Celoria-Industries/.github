@@ -4,9 +4,24 @@ on:
   workflow_call:
     inputs:
       image-name:
-        description: "Image path without registry, e.g. 'celoria-industries/frontend-template'"
+        description: "ECR image repository name"
         required: true
         type: string
+      cache-repository:
+        description: "Separate mutable ECR repository for intermediate build cache images"
+        required: false
+        type: string
+        default: ""
+      aws-region:
+        description: "AWS region containing the ECR repositories"
+        required: false
+        type: string
+        default: ""
+      ecr-push-role-arn:
+        description: "GitHub OIDC role with access to the image and cache repositories"
+        required: false
+        type: string
+        default: ""
       context:
         description: "Build context, relative to repository root"
         required: false
@@ -17,16 +32,16 @@ on:
         required: false
         type: string
         default: "Containerfile"
-      registry:
-        description: "Target registry"
-        required: false
-        type: string
-        default: "ghcr.io"
       push:
-        description: "Push the image after building (build-only when false)"
+        description: "Push the image to ECR (build only when false)"
         required: false
         type: boolean
         default: false
+      commit:
+        description: "Full SHA of a main-branch ancestor to publish; empty uses the triggering commit"
+        required: false
+        type: string
+        default: ""
       platforms:
         description: "Comma-separated target platforms"
         required: false
@@ -42,42 +57,111 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      id-token: write
     steps:
+      - name: Validate publishing inputs
+        env:
+          PUSH: ${{ inputs.push }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+          CACHE_REPOSITORY: ${{ inputs.cache-repository }}
+          AWS_REGION: ${{ inputs.aws-region }}
+          ROLE_ARN: ${{ inputs.ecr-push-role-arn }}
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$IMAGE_NAME" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]]; then
+            echo "::error::Invalid ECR image repository name"
+            exit 1
+          fi
+          if [[ "$PUSH" == "true" ]]; then
+            if [[ "$REF" != "refs/heads/main" || ( "$EVENT_NAME" != "push" && "$EVENT_NAME" != "workflow_dispatch" ) ]]; then
+              echo "::error::Publishing is restricted to main branch pushes or manual runs"
+              exit 1
+            fi
+            if [[ ! "$CACHE_REPOSITORY" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ || "$CACHE_REPOSITORY" == "$IMAGE_NAME" || -z "$AWS_REGION" || -z "$ROLE_ARN" ]]; then
+              echo "::error::Publishing requires an ECR region, OIDC role, and separate cache repository"
+              exit 1
+            fi
+          elif [[ -n "$REQUESTED_COMMIT" ]]; then
+            echo "::error::A source commit can only be selected for publishing"
+            exit 1
+          fi
+
       - name: Checkout Source Code
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Select source commit
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="${REQUESTED_COMMIT:-$(git rev-parse HEAD)}"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$commit" HEAD
+          git checkout --detach "$commit"
+          echo "IMAGE_COMMIT=$commit" >> "$GITHUB_ENV"
 
       - name: Install QEMU for cross-architecture builds
         if: ${{ inputs.platforms != 'linux/amd64' }}
         run: sudo apt-get update && sudo apt-get install -y qemu-user-static
 
+      - name: Configure AWS credentials
+        if: ${{ inputs.push }}
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ inputs.ecr-push-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Log in to ECR
+        if: ${{ inputs.push }}
+        env:
+          AWS_REGION: ${{ inputs.aws-region }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          registry="${account}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | podman login --username AWS --password-stdin "$registry"
+          echo "ECR_REGISTRY=$registry" >> "$GITHUB_ENV"
+
       - name: Build
         env:
-          IMAGE: ${{ inputs.registry }}/${{ inputs.image-name }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+          CACHE_REPOSITORY: ${{ inputs.cache-repository }}
           CONTEXT: ${{ inputs.context }}
           CONTAINERFILE: ${{ inputs.containerfile }}
           PLATFORMS: ${{ inputs.platforms }}
+          PUSH: ${{ inputs.push }}
+        shell: bash
         run: |
           set -euo pipefail
-          podman build \
-            --platform "$PLATFORMS" \
-            --manifest "$IMAGE:$GITHUB_SHA" \
-            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-            -f "$CONTEXT/$CONTAINERFILE" \
-            "$CONTEXT"
+          build_args=(
+            --platform "$PLATFORMS"
+            --manifest "localhost/celoria-image:${IMAGE_COMMIT}"
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            --label "org.opencontainers.image.revision=${IMAGE_COMMIT}"
+          )
+          if [[ "$PUSH" == "true" ]]; then
+            cache="${ECR_REGISTRY}/${CACHE_REPOSITORY}"
+            build_args+=(--layers --cache-from "$cache" --cache-to "$cache")
+          fi
+          podman build "${build_args[@]}" -f "$CONTEXT/$CONTAINERFILE" "$CONTEXT"
 
-      - name: Log in to registry
+      - name: Push image to ECR
         if: ${{ inputs.push }}
         env:
-          REGISTRY: ${{ inputs.registry }}
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$TOKEN" | podman login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
-
-      - name: Push
-        if: ${{ inputs.push }}
-        env:
-          IMAGE: ${{ inputs.registry }}/${{ inputs.image-name }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+        shell: bash
         run: |
           set -euo pipefail
-          podman manifest push --all "$IMAGE:$GITHUB_SHA" "docker://$IMAGE:$GITHUB_SHA"
+          image="${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_COMMIT}"
+          podman manifest push --all "localhost/celoria-image:${IMAGE_COMMIT}" "docker://${image}"
+          echo "Pushed ${image}" >> "$GITHUB_STEP_SUMMARY"

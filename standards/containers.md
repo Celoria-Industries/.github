@@ -5,6 +5,9 @@ Applies to every container-based Celoria workload.
 ## Tooling
 - Podman/Buildah, not Docker. Files are named `Containerfile` and
   `.containerignore`. CI uses `.github/workflows/container-image.yml`.
+- Publish workload images and intermediate build caches to ECR, not GHCR.
+  Keep SHA-tagged image repositories immutable and use separate mutable cache
+  repositories; never put secrets in container layers or build contexts.
 - Do not use `HEALTHCHECK` in the image; Kubernetes probes are the source of truth.
 - Run as a non-root user.
 
