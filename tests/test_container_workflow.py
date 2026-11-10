@@ -66,11 +66,11 @@ class ContainerWorkflowTest(unittest.TestCase):
         self.env["REQUESTED_COMMIT"] = "a" * 40
         self.assertNotEqual(self.run_step("Validate publishing inputs").returncode, 0)
 
-    def test_build_cache_arguments(self):
+    def test_build_arguments(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             podman = path / "podman"
-            podman.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n')
+            podman.write_text('#!/bin/bash\nprintf "%s\\0" "$@" > "$ARGS_FILE"\n')
             podman.chmod(0o755)
             self.env.update({
                 "PATH": f"{directory}:{self.env['PATH']}",
@@ -83,18 +83,33 @@ class ContainerWorkflowTest(unittest.TestCase):
                 "GITHUB_SERVER_URL": "https://github.com",
                 "GITHUB_REPOSITORY": "example/service",
             })
-            self.assertEqual(self.run_step("Build").returncode, 0)
-            args = (path / "args").read_text().splitlines()
             cache = f"{self.env['ECR_REGISTRY']}/frontend-template-cache"
-            self.assertIn("--layers", args)
-            self.assertEqual(args[args.index("--cache-from") + 1], cache)
-            self.assertEqual(args[args.index("--cache-to") + 1], cache)
-
-            self.env["PUSH"] = "false"
-            self.assertEqual(self.run_step("Build").returncode, 0)
-            args = (path / "args").read_text().splitlines()
-            self.assertNotIn("--cache-from", args)
-            self.assertNotIn("--cache-to", args)
+            node_image = f"{self.env['ECR_REGISTRY']}/docker-hub/library/node:26-slim"
+            marker = path / "injected"
+            hostile_image = f'{node_image}; $(touch "{marker}")\n--unexpected-flag'
+            for push in ("true", "false"):
+                for image in ("", node_image, hostile_image):
+                    with self.subTest(push=push, node_image=image):
+                        self.env.update({"PUSH": push, "NODE_IMAGE": image})
+                        if push == "false":
+                            self.env.pop("ECR_REGISTRY", None)
+                        result = self.run_step("Build")
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        args = (path / "args").read_bytes().decode().split("\0")[:-1]
+                        expected = [
+                            "build",
+                            "--platform", "linux/amd64",
+                            "--manifest", f"localhost/celoria-image:{'a' * 40}",
+                            "--label", "org.opencontainers.image.source=https://github.com/example/service",
+                            "--label", f"org.opencontainers.image.revision={'a' * 40}",
+                        ]
+                        if push == "true":
+                            expected.extend(["--layers", "--cache-from", cache, "--cache-to", cache])
+                            if image:
+                                expected.extend(["--build-arg", f"NODE_IMAGE={image}"])
+                        expected.extend(["-f", "./Containerfile", "."])
+                        self.assertEqual(args, expected)
+                        self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":
