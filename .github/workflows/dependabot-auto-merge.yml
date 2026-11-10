@@ -2,7 +2,8 @@ name: Dependabot Auto-Merge
 
 on:
   workflow_call:
-  pull_request:
+  # Use trusted base-branch code and a write-capable token for Dependabot events.
+  pull_request_target:
     types:
       - opened
       - reopened

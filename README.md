@@ -148,10 +148,15 @@ Workload repositories should invoke the workflow with `secrets: inherit`.
 - The optional string `node-image` input defaults to empty. When nonempty and `push: true`, it passes `--build-arg NODE_IMAGE=<value>` after ECR login, allowing callers to select an ECR-cached Node base image. The Containerfile must declare a global `ARG NODE_IMAGE=node:26-slim` (or its existing public Node default) before the first `FROM` and use `FROM ${NODE_IMAGE}` for each Node stage. Empty inputs preserve the Containerfile default; `push: false` ignores the override, so PR builds and local builds keep using the public default. Provision the cache and authorize the CI role to pull the selected image before opting in; an operator pull does not verify CI-role access.
 - `playwright.yml` runs `npm run test:e2e` with Chromium and uploads Playwright reports. Call it with `node-version` and optional `working-directory`; callers need only `contents: read`.
 - `dependabot-auto-merge.yml` enables squash auto-merge for Dependabot
-  minor and patch updates. A caller can use `pull_request_target` with a
+  minor and patch updates. This repository runs it on `pull_request_target`
+  so Dependabot events use trusted base-branch code and can receive the
+  required write permissions. Reusable callers must also use
+  `pull_request_target` with a
   Dependabot-author guard and grant `contents: write` and
   `pull-requests: write`. The reusable job never checks out or executes
-  pull-request code. Enable repository auto-merge and require the appropriate
+  pull-request code; callers must not add steps that execute pull-request
+  code with these permissions. No additional secrets or inputs are required.
+  Enable repository auto-merge, allow squash merging, and require the appropriate
   CI checks on the target branch first; otherwise a pull request could merge
   without waiting for CI. Existing pull requests must be reopened or updated
   to trigger the caller.
