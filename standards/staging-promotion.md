@@ -432,6 +432,11 @@ target value comes from a workflow caller.
 | `staging-plan-signing` | `AWS_ROLE_ARN_STAGING_SIGNER`, `AWS_REGION`, `STAGING_PLAN_TARGET_ACCOUNT_ID`, `STAGING_PLAN_TARGET_REGION`, `STAGING_PLAN_ROOT`, `STAGING_PLAN_SIGNING_KEY_ARN`, `STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64` |
 | `staging` | `AWS_ROLE_ARN_STAGING_APPLY`, `AWS_DEPLOY_ROLE_ARN_STAGING_APPLY`, `TF_STATE_BUCKET_STAGING`, `AWS_REGION`, `STAGING_PLAN_TARGET_ACCOUNT_ID`, `STAGING_PLAN_TARGET_REGION`, `STAGING_PLAN_ROOT`, `STAGING_PLAN_SIGNING_KEY_ARN`, `STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64` |
 
+`AWS_REGION` is required: configure it to the bootstrap state bucket's region
+for planning and apply, and to the signing key's region for signing. The
+signing job rejects a key ARN in a different region. It is not necessarily the
+same as the member-account `STAGING_PLAN_TARGET_REGION`.
+
 Set `STAGING_TRUSTED_PLAN_WORKFLOW` in all three environments to the same full
 ref:
 `Celoria-Industries/.github/.github/workflows/staging-terraform-plan.yml@<40-character SHA>`.

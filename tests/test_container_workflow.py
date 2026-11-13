@@ -115,6 +115,8 @@ class ContainerWorkflowTest(unittest.TestCase):
                         self.assertFalse(marker.exists())
 
     def test_push_outputs_the_ecr_digest(self):
+        step = WORKFLOW.split("      - name: Push image to ECR\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("        env:\n          IMAGE_NAME: ${{ inputs.image-name }}\n", step)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             executable = path / "podman"

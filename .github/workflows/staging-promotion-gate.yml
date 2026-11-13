@@ -70,7 +70,7 @@ jobs:
 
       - name: Validate promotion request
         id: gate
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           trusted-image-producer-workflow: ${{ vars.STAGING_TRUSTED_IMAGE_WORKFLOW }}
@@ -122,7 +122,7 @@ jobs:
       - name: Revalidate solo authorization and image evidence
         id: image-authorization
         if: needs.verify.outputs.approval_mode == 'solo' && needs.verify.outputs.promotion_kind == 'image'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -139,7 +139,7 @@ jobs:
       - name: Revalidate solo authorization and Terraform evidence
         id: plan-authorization
         if: needs.verify.outputs.approval_mode == 'solo' && needs.verify.outputs.promotion_kind == 'terraform'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -185,7 +185,7 @@ jobs:
 
       - name: Consume the exact solo authorization
         if: needs.verify.outputs.approval_mode == 'solo'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
         with:
           operation: consume-solo
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
@@ -246,7 +246,7 @@ jobs:
       - name: Revalidate reviewed image evidence
         id: image-gate
         if: needs.verify.outputs.promotion_kind == 'image'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -268,7 +268,7 @@ jobs:
       - name: Verify downloaded Terraform plan and KMS signature
         id: plan-gate
         if: needs.verify.outputs.promotion_kind == 'terraform'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -319,6 +319,7 @@ jobs:
           STATE_ROLE_ARN: ${{ vars.AWS_ROLE_ARN_STAGING_APPLY }}
           DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN_STAGING_APPLY }}
           STATE_BUCKET: ${{ vars.TF_STATE_BUCKET_STAGING }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
           TARGET_ACCOUNT_ID: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
           TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
           TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
@@ -335,6 +336,7 @@ jobs:
           [[ "${BASH_REMATCH[1]}" == "$TARGET_ACCOUNT_ID" ]] || { echo "::error::Staging deploy-apply role account does not match the approved target"; exit 1; }
           [[ "$state_account" != "$TARGET_ACCOUNT_ID" ]] || { echo "::error::Bootstrap state-apply role and staging deploy account must be distinct"; exit 1; }
           [[ "$STATE_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { echo "::error::Configure TF_STATE_BUCKET_STAGING"; exit 1; }
+          [[ "$AWS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Configure AWS_REGION for the bootstrap state"; exit 1; }
           [[ "$TARGET_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || { echo "::error::Configure STAGING_PLAN_TARGET_ACCOUNT_ID"; exit 1; }
           [[ "$TARGET_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Configure STAGING_PLAN_TARGET_REGION"; exit 1; }
           [[ "$TERRAFORM_ROOT" =~ ^stacks/[a-z0-9][a-z0-9-]*/staging/[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$ ]] || { echo "::error::Configure STAGING_PLAN_ROOT"; exit 1; }
@@ -369,7 +371,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN_STAGING_APPLY }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+          aws-region: ${{ vars.AWS_REGION }}
           role-session-name: StagingTfApply-${{ github.run_id }}
 
       - name: Configure the member-account deploy-apply profile
@@ -467,7 +469,7 @@ jobs:
           PLAN_PATH: ${{ runner.temp }}/staging-plan-artifacts/staging-terraform-plan/tfplan
           TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
           STATE_BUCKET: ${{ vars.TF_STATE_BUCKET_STAGING }}
-          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
           TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
           TF_IN_AUTOMATION: "true"
           TF_INPUT: "false"

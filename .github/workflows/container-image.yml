@@ -175,6 +175,8 @@ jobs:
       - name: Push image to ECR
         if: ${{ inputs.push }}
         id: push
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
         shell: bash
         run: |
           set -euo pipefail

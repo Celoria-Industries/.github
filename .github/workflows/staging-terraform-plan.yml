@@ -46,7 +46,7 @@ jobs:
     steps:
       - name: Validate merged source PR and current human approval
         id: gate
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
         with:
           verification-mode: source-pr
           source-pr-number: ${{ inputs.source-pr-number }}
@@ -73,7 +73,7 @@ jobs:
       plan_artifact_id: ${{ steps.upload-plan.outputs.artifact-id }}
       plan_artifact_digest: ${{ steps.upload-plan.outputs.artifact-digest }}
     env:
-      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
       STATE_ROLE_ARN: ${{ vars.AWS_ROLE_ARN_STAGING_PLAN }}
       DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN_STAGING_PLAN }}
       STATE_BUCKET: ${{ vars.TF_STATE_BUCKET_STAGING }}
@@ -95,10 +95,11 @@ jobs:
           [[ "${BASH_REMATCH[1]}" == "$TARGET_ACCOUNT_ID" ]] || { echo "::error::Staging deploy-plan role account does not match STAGING_PLAN_TARGET_ACCOUNT_ID"; exit 1; }
           [[ "$state_account" != "$TARGET_ACCOUNT_ID" ]] || { echo "::error::Bootstrap state-plan role and staging deploy account must be distinct"; exit 1; }
           [[ "$STATE_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { echo "::error::Configure TF_STATE_BUCKET_STAGING"; exit 1; }
+          [[ "$AWS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Configure AWS_REGION for the bootstrap state"; exit 1; }
           [[ "$TARGET_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || { echo "::error::Configure STAGING_PLAN_TARGET_ACCOUNT_ID"; exit 1; }
           [[ "$TARGET_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Configure STAGING_PLAN_TARGET_REGION"; exit 1; }
           [[ "$TERRAFORM_ROOT" =~ ^stacks/[a-z0-9][a-z0-9-]*/staging/[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$ ]] || { echo "::error::Configure STAGING_PLAN_ROOT to one staging stack"; exit 1; }
-          [[ "$GITHUB_EVENT_NAME" == "workflow_call" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]] || { echo "::error::Unsupported plan event"; exit 1; }
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]] || { echo "::error::Plan producer caller must be manually dispatched"; exit 1; }
           [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "::error::Plan producer caller must be dispatched from main"; exit 1; }
           printf 'state_account=%s\n' "$state_account" >> "$GITHUB_OUTPUT"
 
@@ -198,7 +199,7 @@ jobs:
       evidence_artifact_id: ${{ steps.upload-evidence.outputs.artifact-id }}
       evidence_artifact_digest: ${{ steps.upload-evidence.outputs.artifact-digest }}
     env:
-      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
       SIGNER_ROLE_ARN: ${{ vars.AWS_ROLE_ARN_STAGING_SIGNER }}
       SIGNING_KEY_ARN: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
       TARGET_ACCOUNT_ID: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
@@ -215,9 +216,10 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ github.run_id }}
+          digest-mismatch: error
 
       - name: Validate provenance and prepare canonical record
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
         with:
           operation: prepare-plan-evidence
           source-pr-number: ${{ inputs.source-pr-number }}
@@ -244,11 +246,12 @@ jobs:
         run: |
           set -euo pipefail
           role_re='^arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9+=,.@_/-]+$'
-          key_re='^arn:aws:kms:[a-z0-9-]+:([0-9]{12}):key/[0-9a-f-]{36}$'
+          key_re='^arn:aws:kms:([a-z0-9-]+):([0-9]{12}):key/[0-9a-f-]{36}$'
+          [[ "$AWS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Configure AWS_REGION for the signing key"; exit 1; }
           [[ "$SIGNER_ROLE_ARN" =~ $role_re ]] || { echo "::error::Configure AWS_ROLE_ARN_STAGING_SIGNER"; exit 1; }
           signer_account="${BASH_REMATCH[1]}"
           [[ "$SIGNING_KEY_ARN" =~ $key_re ]] || { echo "::error::Configure STAGING_PLAN_SIGNING_KEY_ARN with an immutable key ARN"; exit 1; }
-          [[ "${BASH_REMATCH[1]}" == "$signer_account" ]] || { echo "::error::KMS signer and signing key must be in the same bootstrap account"; exit 1; }
+          [[ "${BASH_REMATCH[1]}" == "$AWS_REGION" && "${BASH_REMATCH[2]}" == "$signer_account" ]] || { echo "::error::KMS key must match the configured signer region and account"; exit 1; }
           [[ "$PUBLIC_KEY_DER_B64" =~ ^[A-Za-z0-9+/]+=*$ ]] || { echo "::error::Configure STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64"; exit 1; }
 
       - name: Assume the KMS-only staging plan signer role

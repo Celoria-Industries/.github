@@ -1,5 +1,7 @@
 import unittest
 import subprocess
+import os
+import tempfile
 
 from pathlib import Path
 import sys
@@ -8,6 +10,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".github/actions/staging-promotion-gate"))
 STAGING_WORKFLOW = (ROOT / ".github/workflows/staging-promotion-gate.yml").read_text()
+PLAN_WORKFLOW = (ROOT / ".github/workflows/staging-terraform-plan.yml").read_text()
+GATE_ACTION = (ROOT / ".github/actions/staging-promotion-gate/action.yml").read_text()
 
 from verify_promotion import (  # noqa: E402
     GateError,
@@ -106,11 +110,24 @@ class StagingPromotionGateTest(unittest.TestCase):
         validate_promotion_trigger("workflow_dispatch", "refs/heads/main")
         for event, ref in (
             ("pull_request", "refs/pull/42/merge"),
+            ("workflow_call", "refs/heads/main"),
             ("workflow_dispatch", "refs/heads/feature"),
         ):
             with self.subTest(event=event, ref=ref):
                 with self.assertRaisesRegex(GateError, "only from a push or manual dispatch on main"):
                     validate_promotion_trigger(event, ref)
+
+    def test_action_rejects_unknown_operation(self):
+        step = GATE_ACTION.split("    - name: Validate operation\n", 1)[1].split("\n    - ", 1)[0]
+        script = step.split("      run: |\n", 1)[1]
+        script = "\n".join(line[8:] for line in script.splitlines())
+        for operation, allowed in (("verify", True), ("prepare-plan-evidence", True),
+                                   ("consume-solo", True), ("verfy", False), ("", False)):
+            with self.subTest(operation=operation):
+                result = subprocess.run(["bash", "-c", script],
+                                        env={**os.environ, "OPERATION": operation},
+                                        capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode == 0, allowed)
 
     def test_requires_exact_head_human_approval_and_successful_checks(self):
         validated_pr, head_sha = validate_reviewed_pr(FakeApi(), "celoria/service", 7, promotion=True)
@@ -142,6 +159,72 @@ class StagingPromotionGateTest(unittest.TestCase):
                 7,
                 promotion=True,
             )
+
+    def test_older_change_request_remains_blocking_after_comment(self):
+        blocker = approval(login="second-reviewer", review_head="e" * 40, state="CHANGES_REQUESTED")
+        comment = {**blocker, "state": "COMMENTED", "submitted_at": "2026-11-12T09:30:00Z"}
+        with self.assertRaisesRegex(GateError, "unresolved change requests"):
+            validate_reviewed_pr(FakeApi(reviews=[approval(), blocker, comment]), "celoria/service", 7)
+        resolved = {**blocker, "state": "APPROVED", "commit_id": HEAD_SHA,
+                    "submitted_at": "2026-11-12T09:45:00Z"}
+        validate_reviewed_pr(FakeApi(reviews=[approval(), blocker, comment, resolved]), "celoria/service", 7)
+
+    def test_plan_download_requires_digest_match(self):
+        step = PLAN_WORKFLOW.split("      - name: Download the exact saved-plan artifact\n", 1)[1]
+        step = step.split("\n      - name:", 1)[0]
+        self.assertIn("          digest-mismatch: error\n", step + "\n")
+
+    def test_staging_region_must_be_explicit_before_credentials(self):
+        for workflow, step_name, env in (
+            (PLAN_WORKFLOW, "Validate fixed staging plan configuration", {
+                "STATE_ROLE_ARN": "arn:aws:iam::111111111111:role/state",
+                "DEPLOY_ROLE_ARN": "arn:aws:iam::222222222222:role/deploy",
+                "STATE_BUCKET": "example-state", "TARGET_ACCOUNT_ID": "222222222222",
+                "TARGET_REGION": "us-east-2", "TERRAFORM_ROOT": "stacks/example/staging/network",
+                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
+            }),
+            (PLAN_WORKFLOW, "Validate isolated KMS signer identity", {
+                "SIGNER_ROLE_ARN": "arn:aws:iam::111111111111:role/sign",
+                "SIGNING_KEY_ARN": "arn:aws:kms:us-east-2:111111111111:key/" + "a" * 36,
+                "PUBLIC_KEY_DER_B64": "YWJj",
+            }),
+            (STAGING_WORKFLOW, "Validate staging Terraform apply configuration", {
+                "STATE_ROLE_ARN": "arn:aws:iam::111111111111:role/state",
+                "DEPLOY_ROLE_ARN": "arn:aws:iam::222222222222:role/deploy",
+                "STATE_BUCKET": "example-state", "TARGET_ACCOUNT_ID": "222222222222",
+                "TARGET_REGION": "us-east-2", "TERRAFORM_ROOT": "stacks/example/staging/network",
+                "SIGNING_KEY_ARN": "arn:aws:kms:us-east-2:111111111111:key/" + "a" * 36,
+                "PUBLIC_KEY": "YWJj", "TRUSTED_PLAN_WORKFLOW": PLAN_WORKFLOW_REF,
+            }),
+        ):
+            step = workflow.split(f"      - name: {step_name}\n", 1)[1].split("\n      - name:", 1)[0]
+            script = step.split("        run: |\n", 1)[1]
+            script = "\n".join(line[10:] for line in script.splitlines())
+            with tempfile.TemporaryDirectory() as directory:
+                for region, expected in (("", False), ("not-a-region", False), ("us-east-2", True)):
+                    with self.subTest(step=step_name, region=region):
+                        result = subprocess.run(
+                            ["bash", "-c", script],
+                            env={**os.environ, **env, "AWS_REGION": region, "GITHUB_OUTPUT": directory + "/out"},
+                            capture_output=True, text=True, check=False,
+                        )
+                        self.assertEqual(result.returncode == 0, expected, result.stderr + result.stdout)
+                if step_name == "Validate isolated KMS signer identity":
+                    result = subprocess.run(
+                        ["bash", "-c", script],
+                        env={**os.environ, **env, "AWS_REGION": "us-west-2"},
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("configured signer region", result.stdout)
+                if step_name == "Validate fixed staging plan configuration":
+                    result = subprocess.run(
+                        ["bash", "-c", script],
+                        env={**os.environ, **env, "AWS_REGION": "us-east-2",
+                             "GITHUB_EVENT_NAME": "workflow_call", "GITHUB_OUTPUT": directory + "/out"},
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
 
     def test_rejects_author_and_bot_approvals(self):
         for review in (approval(login="contributor"), approval(login="automation[bot]", user_type="Bot")):
