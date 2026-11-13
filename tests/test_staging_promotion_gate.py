@@ -11,6 +11,7 @@ from verify_promotion import (  # noqa: E402
     GateError,
     validate_image_manifest,
     validate_plan_manifest,
+    validate_promotion_trigger,
     validate_reviewed_pr,
 )
 
@@ -67,6 +68,16 @@ class FakeApi:
 
 
 class StagingPromotionGateTest(unittest.TestCase):
+    def test_promotion_must_be_invoked_from_main(self):
+        validate_promotion_trigger("workflow_dispatch", "refs/heads/main")
+        for event, ref in (
+            ("pull_request", "refs/pull/42/merge"),
+            ("workflow_dispatch", "refs/heads/feature"),
+        ):
+            with self.subTest(event=event, ref=ref):
+                with self.assertRaisesRegex(GateError, "only from a push or manual dispatch on main"):
+                    validate_promotion_trigger(event, ref)
+
     def test_requires_exact_head_human_approval_and_successful_checks(self):
         validated_pr, head_sha = validate_reviewed_pr(FakeApi(), "celoria/service", 7, promotion=True)
         self.assertEqual(validated_pr["merged_at"], "2026-11-12T10:00:00Z")

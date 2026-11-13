@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -271,6 +272,13 @@ def validate_image_name(value, label):
             f"{label} is not a valid ECR repository name")
 
 
+def validate_promotion_trigger(event_name, ref):
+    require(
+        ref == "refs/heads/main" and event_name in ("push", "workflow_dispatch"),
+        "Staging promotion may run only from a push or manual dispatch on main",
+    )
+
+
 def validate_plan_manifest(manifest, repository, trusted_workflow, terraform_directory):
     require_object(manifest, ("schema_version", "target", "kind", "source", "destination"), "manifest")
     require(manifest["schema_version"] == 1, "Unsupported promotion manifest schema_version")
@@ -366,6 +374,14 @@ def validate_plan_run_and_artifact(api, repository, source, plan_path):
     require(run_info.get("id") == source["workflow_run_id"]
             and run_info.get("head_sha") == source["commit"],
             "Terraform artifact is not from the specified source run and commit")
+    try:
+        artifact_created = datetime.fromisoformat(artifact["created_at"].replace("Z", "+00:00"))
+        attempt_started = datetime.fromisoformat(run["run_started_at"].replace("Z", "+00:00"))
+        attempt_updated = datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError) as error:
+        raise GateError("GitHub API did not provide timestamps to bind the artifact to its run attempt") from error
+    require(attempt_started <= artifact_created <= attempt_updated,
+            "Terraform artifact was not created during the specified workflow run attempt")
 
     with tempfile.TemporaryDirectory(prefix="celoria-plan-") as directory:
         archive = os.path.join(directory, "artifact.zip")
@@ -418,10 +434,9 @@ def write_outputs(values):
 
 
 def main():
-    require(
-        os.environ.get("GITHUB_REF") == "refs/heads/main"
-        and os.environ.get("GITHUB_EVENT_NAME") in ("push", "workflow_dispatch"),
-        "Staging promotion may run only from a push or manual dispatch on main",
+    validate_promotion_trigger(
+        os.environ.get("GITHUB_EVENT_NAME", ""),
+        os.environ.get("GITHUB_REF", ""),
     )
     repository = validate_repo(os.environ.get("GITHUB_REPOSITORY"), "GITHUB_REPOSITORY")
     pr_number = parse_positive_int(os.environ.get("PROMOTION_PR_NUMBER"), "promotion-pr-number")
