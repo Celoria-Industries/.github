@@ -204,6 +204,16 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Validate operation
+      shell: bash
+      env:
+        OPERATION: ${{ inputs.operation }}
+      run: |
+        case "$OPERATION" in
+          verify|prepare-plan-evidence|consume-solo) ;;
+          *) echo "::error::Unsupported staging gate operation"; exit 1 ;;
+        esac
+
     - id: consume
       if: inputs.operation == 'consume-solo'
       shell: bash

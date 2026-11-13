@@ -181,7 +181,9 @@ def validate_reviewed_pr(api, repository, number, required_head=None, promotion=
     for review in reviews:
         user = review.get("user") or {}
         submitted_at = review.get("submitted_at")
-        if not submitted_at or not user.get("login"):
+        if not submitted_at or not user.get("login") or review.get("state") not in (
+            "APPROVED", "CHANGES_REQUESTED", "DISMISSED"
+        ):
             continue
         login = user["login"].lower()
         if login not in latest or submitted_at >= latest[login].get("submitted_at", ""):
@@ -211,11 +213,7 @@ def validate_reviewed_pr(api, repository, number, required_head=None, promotion=
             break
     require(len(check_runs) < 10000, f"PR #{number} has too many check runs to verify safely")
     require(bool(check_runs), f"PR #{number} has no check-run evidence")
-    current_reviews = [
-        review for review in latest.values()
-        if review.get("commit_id") == head_sha
-    ]
-    require(not any(review.get("state") in ("CHANGES_REQUESTED", "DISMISSED") for review in current_reviews),
+    require(not any(review.get("state") in ("CHANGES_REQUESTED", "DISMISSED") for review in latest.values()),
             f"PR #{number} has unresolved change requests or dismissed approvals")
     require(all(
         check.get("status") == "completed"
