@@ -36,6 +36,12 @@ on:
       evidence-artifact-id:
         description: Verified signed-evidence artifact ID; empty for image promotions
         value: ${{ jobs.promote.outputs.evidence_artifact_id }}
+      plan-layer:
+        description: Verified allowlisted staging layer; empty for image promotions
+        value: ${{ jobs.promote.outputs.plan_layer }}
+      terraform-root:
+        description: Verified allowlisted staging root; empty for image promotions
+        value: ${{ jobs.promote.outputs.terraform_root }}
 
 permissions:
   contents: read
@@ -60,6 +66,8 @@ jobs:
       producer_run_id: ${{ steps.gate.outputs.producer-run-id }}
       plan_artifact_id: ${{ steps.gate.outputs.plan-artifact-id }}
       evidence_artifact_id: ${{ steps.gate.outputs.evidence-artifact-id }}
+      plan_layer: ${{ steps.gate.outputs.plan-layer }}
+      terraform_root: ${{ steps.gate.outputs.terraform-root }}
       approval_mode: ${{ steps.gate.outputs.approval-mode }}
     steps:
       - name: Stop disabled staging promotion
@@ -70,14 +78,13 @@ jobs:
 
       - name: Validate promotion request
         id: gate
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           trusted-image-producer-workflow: ${{ vars.STAGING_TRUSTED_IMAGE_WORKFLOW }}
           trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
           plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
           plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
-          plan-root: ${{ vars.STAGING_PLAN_ROOT }}
           plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
           approval-mode: ${{ vars.STAGING_APPROVAL_MODE || 'independent' }}
           solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
@@ -122,7 +129,7 @@ jobs:
       - name: Revalidate solo authorization and image evidence
         id: image-authorization
         if: needs.verify.outputs.approval_mode == 'solo' && needs.verify.outputs.promotion_kind == 'image'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -139,7 +146,7 @@ jobs:
       - name: Revalidate solo authorization and Terraform evidence
         id: plan-authorization
         if: needs.verify.outputs.approval_mode == 'solo' && needs.verify.outputs.promotion_kind == 'terraform'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -149,7 +156,6 @@ jobs:
           evidence-signature-path: ${{ runner.temp }}/staging-plan-artifacts/staging-terraform-evidence/signature.b64
           plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
           plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
-          plan-root: ${{ vars.STAGING_PLAN_ROOT }}
           plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
           plan-signing-public-key-der-b64: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}
           approval-mode: solo
@@ -185,7 +191,7 @@ jobs:
 
       - name: Consume the exact solo authorization
         if: needs.verify.outputs.approval_mode == 'solo'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
         with:
           operation: consume-solo
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
@@ -225,6 +231,8 @@ jobs:
       producer_run_id: ${{ needs.verify.outputs.producer_run_id }}
       plan_artifact_id: ${{ needs.verify.outputs.plan_artifact_id }}
       evidence_artifact_id: ${{ needs.verify.outputs.evidence_artifact_id }}
+      plan_layer: ${{ needs.verify.outputs.plan_layer }}
+      terraform_root: ${{ needs.verify.outputs.terraform_root }}
     steps:
       - name: Stop disabled staging writer
         shell: bash
@@ -246,7 +254,7 @@ jobs:
       - name: Revalidate reviewed image evidence
         id: image-gate
         if: needs.verify.outputs.promotion_kind == 'image'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -254,7 +262,6 @@ jobs:
           trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
           plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
           plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
-          plan-root: ${{ vars.STAGING_PLAN_ROOT }}
           plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
           approval-mode: ${{ needs.verify.outputs.approval_mode }}
           solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
@@ -268,7 +275,7 @@ jobs:
       - name: Verify downloaded Terraform plan and KMS signature
         id: plan-gate
         if: needs.verify.outputs.promotion_kind == 'terraform'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -279,7 +286,6 @@ jobs:
           evidence-signature-path: ${{ runner.temp }}/staging-plan-artifacts/staging-terraform-evidence/signature.b64
           plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
           plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
-          plan-root: ${{ vars.STAGING_PLAN_ROOT }}
           plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
           plan-signing-public-key-der-b64: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}
           approval-mode: ${{ needs.verify.outputs.approval_mode }}
@@ -322,7 +328,8 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
           TARGET_ACCOUNT_ID: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
           TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
-          TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
+          TERRAFORM_ROOT: ${{ needs.verify.outputs.terraform_root }}
+          PLAN_LAYER: ${{ needs.verify.outputs.plan_layer }}
           SIGNING_KEY_ARN: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
           PUBLIC_KEY: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}
           TRUSTED_PLAN_WORKFLOW: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
@@ -339,7 +346,8 @@ jobs:
           [[ "$AWS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Configure AWS_REGION for the bootstrap state"; exit 1; }
           [[ "$TARGET_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || { echo "::error::Configure STAGING_PLAN_TARGET_ACCOUNT_ID"; exit 1; }
           [[ "$TARGET_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Configure STAGING_PLAN_TARGET_REGION"; exit 1; }
-          [[ "$TERRAFORM_ROOT" =~ ^stacks/[a-z0-9][a-z0-9-]*/staging/[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$ ]] || { echo "::error::Configure STAGING_PLAN_ROOT"; exit 1; }
+          case "$PLAN_LAYER" in foundation|nervous-system|service-bootstrap) ;; *) echo "::error::Verified staging layer is unsupported"; exit 1 ;; esac
+          [[ "$TERRAFORM_ROOT" == "stacks/celoria-industries/staging/${PLAN_LAYER}" ]] || { echo "::error::Verified Terraform root does not match the allowlisted layer"; exit 1; }
           [[ "$SIGNING_KEY_ARN" =~ ^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f-]{36}$ ]] || { echo "::error::Configure STAGING_PLAN_SIGNING_KEY_ARN"; exit 1; }
           [[ "$PUBLIC_KEY" =~ ^[A-Za-z0-9+/]+=*$ ]] || { echo "::error::Configure STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64"; exit 1; }
           [[ "$TRUSTED_PLAN_WORKFLOW" =~ ^Celoria-Industries/\.github/\.github/workflows/staging-terraform-plan\.yml@[0-9a-f]{40}$ ]] || { echo "::error::Configure STAGING_TRUSTED_PLAN_WORKFLOW to an immutable central workflow SHA"; exit 1; }
@@ -467,7 +475,7 @@ jobs:
         if: needs.verify.outputs.promotion_kind == 'terraform'
         env:
           PLAN_PATH: ${{ runner.temp }}/staging-plan-artifacts/staging-terraform-plan/tfplan
-          TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
+          TERRAFORM_ROOT: ${{ needs.verify.outputs.terraform_root }}
           STATE_BUCKET: ${{ vars.TF_STATE_BUCKET_STAGING }}
           AWS_REGION: ${{ vars.AWS_REGION }}
           TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}

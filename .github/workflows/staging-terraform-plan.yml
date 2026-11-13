@@ -7,6 +7,10 @@ on:
         description: Merged, human-reviewed infrastructure PR to plan
         required: true
         type: number
+      plan-layer:
+        description: Allowlisted staging layer selected by the source PR label
+        required: true
+        type: string
       source-authorization-comment-id:
         description: Source authorization comment ID when solo mode is configured
         required: false
@@ -25,6 +29,12 @@ on:
       evidence-artifact-digest:
         description: GitHub SHA-256 digest of the signed-evidence artifact
         value: ${{ jobs.sign.outputs.evidence_artifact_digest }}
+      plan-layer:
+        description: Allowlisted staging layer selected for the saved plan
+        value: ${{ jobs.validate-source.outputs.plan_layer }}
+      terraform-root:
+        description: Exact allowlisted staging root selected for the saved plan
+        value: ${{ jobs.validate-source.outputs.terraform_root }}
 
 permissions:
   contents: read
@@ -43,13 +53,16 @@ jobs:
       source_pr_head_sha: ${{ steps.gate.outputs.source-pull-request-head-sha }}
       source_pr_merge_sha: ${{ steps.gate.outputs.source-pull-request-merge-sha }}
       source_commit: ${{ steps.gate.outputs.source-commit }}
+      plan_layer: ${{ steps.gate.outputs.plan-layer }}
+      terraform_root: ${{ steps.gate.outputs.terraform-root }}
     steps:
       - name: Validate merged source PR and current human approval
         id: gate
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
         with:
           verification-mode: source-pr
           source-pr-number: ${{ inputs.source-pr-number }}
+          plan-layer: ${{ inputs.plan-layer }}
           plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
           plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
           approval-mode: ${{ vars.STAGING_APPROVAL_MODE || 'independent' }}
@@ -79,7 +92,8 @@ jobs:
       STATE_BUCKET: ${{ vars.TF_STATE_BUCKET_STAGING }}
       TARGET_ACCOUNT_ID: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
       TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
-      TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
+      TERRAFORM_ROOT: ${{ needs.validate-source.outputs.terraform_root }}
+      PLAN_LAYER: ${{ inputs.plan-layer }}
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
     steps:
@@ -98,7 +112,8 @@ jobs:
           [[ "$AWS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Configure AWS_REGION for the bootstrap state"; exit 1; }
           [[ "$TARGET_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || { echo "::error::Configure STAGING_PLAN_TARGET_ACCOUNT_ID"; exit 1; }
           [[ "$TARGET_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Configure STAGING_PLAN_TARGET_REGION"; exit 1; }
-          [[ "$TERRAFORM_ROOT" =~ ^stacks/[a-z0-9][a-z0-9-]*/staging/[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$ ]] || { echo "::error::Configure STAGING_PLAN_ROOT to one staging stack"; exit 1; }
+          case "$PLAN_LAYER" in foundation|nervous-system|service-bootstrap) ;; *) echo "::error::Unsupported staging plan layer"; exit 1 ;; esac
+          [[ "$TERRAFORM_ROOT" == "stacks/celoria-industries/staging/${PLAN_LAYER}" ]] || { echo "::error::Validated Terraform root does not match the requested layer"; exit 1; }
           [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]] || { echo "::error::Plan producer caller must be manually dispatched"; exit 1; }
           [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "::error::Plan producer caller must be dispatched from main"; exit 1; }
           printf 'state_account=%s\n' "$state_account" >> "$GITHUB_OUTPUT"
@@ -153,7 +168,7 @@ jobs:
       - name: Initialize and create the staging saved plan
         env:
           TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
-          TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
+          TERRAFORM_ROOT: ${{ needs.validate-source.outputs.terraform_root }}
         shell: bash
         run: |
           set -euo pipefail
@@ -163,7 +178,8 @@ jobs:
             -backend-config="region=$AWS_REGION" \
             -backend-config="use_lockfile=true"
           terraform -chdir="$TERRAFORM_ROOT" plan -input=false -no-color \
-            -lock-timeout=5m -var="region=$TARGET_REGION" -out=tfplan
+            -lock-timeout=5m -var="account_id=$TARGET_ACCOUNT_ID" \
+            -var="region=$TARGET_REGION" -out=tfplan
           terraform -chdir="$TERRAFORM_ROOT" show -json tfplan \
             | jq -r '[.resource_changes[]?.change.actions[]?] | group_by(.) | map({(.[0]): length}) | add // {}' \
             > "$RUNNER_TEMP/staging-plan-summary.json"
@@ -204,7 +220,8 @@ jobs:
       SIGNING_KEY_ARN: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
       TARGET_ACCOUNT_ID: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
       TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
-      TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
+      TERRAFORM_ROOT: ${{ needs.validate-source.outputs.terraform_root }}
+      PLAN_LAYER: ${{ needs.validate-source.outputs.plan_layer }}
       TRUSTED_PLAN_WORKFLOW: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
       PUBLIC_KEY_DER_B64: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}
     steps:
@@ -219,7 +236,7 @@ jobs:
           digest-mismatch: error
 
       - name: Validate provenance and prepare canonical record
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@daf027a2e1c0239d20fa7a7cc4202749b284c1a7
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
         with:
           operation: prepare-plan-evidence
           source-pr-number: ${{ inputs.source-pr-number }}
@@ -232,7 +249,7 @@ jobs:
           trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
           plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
           plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
-          plan-root: ${{ vars.STAGING_PLAN_ROOT }}
+          plan-layer: ${{ inputs.plan-layer }}
           plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
           approval-mode: ${{ vars.STAGING_APPROVAL_MODE || 'independent' }}
           solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
@@ -315,7 +332,8 @@ jobs:
           SOURCE_PR_MERGE_SHA: ${{ needs.validate-source.outputs.source_pr_merge_sha }}
           TARGET_ACCOUNT_ID: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
           TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
-          TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
+          TERRAFORM_ROOT: ${{ needs.validate-source.outputs.terraform_root }}
+          PLAN_LAYER: ${{ needs.validate-source.outputs.plan_layer }}
           SIGNING_KEY_ARN: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
           TRUSTED_PLAN_WORKFLOW: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
         shell: bash
@@ -336,6 +354,7 @@ jobs:
             --arg root "$TERRAFORM_ROOT" \
             --arg key "$SIGNING_KEY_ARN" \
             --argjson source_pr "$SOURCE_PR_NUMBER" \
+            --arg plan_layer "$PLAN_LAYER" \
             --argjson run_id "$GITHUB_RUN_ID" \
             --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
             --argjson plan_id "$PLAN_ARTIFACT_ID" \
@@ -363,6 +382,7 @@ jobs:
                 evidence_artifact_digest: $evidence_digest,
                 target_account_id: $account,
                 target_region: $region,
+                plan_layer: $plan_layer,
                 terraform_root: $root,
                 signing_key_arn: $key,
                 signing_algorithm: "RSASSA_PSS_SHA_256"

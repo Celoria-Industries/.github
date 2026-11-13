@@ -18,3 +18,37 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+  image-transfer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes skopeo
+      - name: Copy and verify all platforms between disposable registries
+        env:
+          CONTAINER_ENGINE: docker
+        run: python3 tests/test_oci_transfer_integration.py
+
+  reusable-context:
+    uses: ./.github/workflows/reusable-context-probe.yml
+
+  assert-reusable-context:
+    needs: reusable-context
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      ACTUAL_EVENT: ${{ needs.reusable-context.outputs.caller-event-name }}
+      ACTUAL_REF: ${{ needs.reusable-context.outputs.caller-ref }}
+      EXPECTED_EVENT: ${{ github.event_name }}
+      EXPECTED_REF: ${{ github.ref }}
+    steps:
+      - shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACTUAL_EVENT" == "$EXPECTED_EVENT" ]] || { echo "::error::Reusable event context differs from caller"; exit 1; }
+          [[ "$ACTUAL_REF" == "$EXPECTED_REF" ]] || { echo "::error::Reusable ref context differs from caller"; exit 1; }
