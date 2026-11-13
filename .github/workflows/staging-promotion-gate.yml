@@ -51,6 +51,12 @@ jobs:
       plan_artifact_id: ${{ steps.gate.outputs.plan-artifact-id }}
       evidence_artifact_id: ${{ steps.gate.outputs.evidence-artifact-id }}
     steps:
+      - name: Stop disabled staging promotion
+        shell: bash
+        run: |
+          echo "::error::Staging image promotion and Terraform apply are disabled pending security and integrity validation."
+          exit 1
+
       - name: Validate promotion request
         id: gate
         uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@58a4ab32b02046ce565f4426c5791a5b43f672ce
@@ -85,6 +91,12 @@ jobs:
       plan_artifact_id: ${{ needs.verify.outputs.plan_artifact_id }}
       evidence_artifact_id: ${{ needs.verify.outputs.evidence_artifact_id }}
     steps:
+      - name: Stop disabled staging writer
+        shell: bash
+        run: |
+          echo "::error::Staging writer is disabled pending security and integrity validation."
+          exit 1
+
       - name: Download exact signed Terraform artifacts
         if: needs.verify.outputs.promotion_kind == 'terraform'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333

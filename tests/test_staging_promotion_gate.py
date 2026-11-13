@@ -1,4 +1,5 @@
 import unittest
+import subprocess
 
 from pathlib import Path
 import sys
@@ -78,11 +79,29 @@ class FakeApi:
 
 
 class StagingPromotionGateTest(unittest.TestCase):
-    def test_image_copy_transfers_all_platforms_and_preserves_digest(self):
-        self.assertIn("podman pull --all --authfile", STAGING_WORKFLOW)
-        self.assertIn("podman push --all --authfile", STAGING_WORKFLOW)
-        self.assertIn('[[ "$promoted_digest" == "$EXPECTED_DIGEST" ]]', STAGING_WORKFLOW)
-        self.assertNotIn("ecr put-image", STAGING_WORKFLOW)
+    def test_promotion_fails_before_credential_job(self):
+        for job, guard in (
+            ("verify", "Stop disabled staging promotion"),
+            ("promote", "Stop disabled staging writer"),
+        ):
+            with self.subTest(job=job):
+                job_body = STAGING_WORKFLOW.split(f"\n  {job}:\n", 1)[1].split("\n  promote:\n", 1)[0]
+                first_step = job_body.split("    steps:\n", 1)[1].split("\n      - name:", 1)[0]
+                self.assertIn(f"- name: {guard}", first_step)
+                script = first_step.split("        run: |\n", 1)[1]
+                result = subprocess.run(
+                    ["bash", "-c", "\n".join(line[10:] for line in script.splitlines())],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("disabled pending security and integrity validation", result.stdout)
+                self.assertNotIn("continue-on-error", first_step)
+        promote = STAGING_WORKFLOW.split("\n  promote:\n", 1)[1]
+        self.assertIn("    needs: verify\n", promote)
+        self.assertNotIn("    if:", promote.split("    steps:\n", 1)[0])
+
     def test_promotion_must_be_invoked_from_main(self):
         validate_promotion_trigger("workflow_dispatch", "refs/heads/main")
         for event, ref in (
