@@ -52,6 +52,10 @@ on:
         required: false
         type: string
         default: "linux/amd64"
+    outputs:
+      image-digest:
+        description: "Digest of the published image in ECR; empty for builds without push"
+        value: ${{ jobs.image.outputs.image_digest }}
 
 permissions:
   contents: read
@@ -60,6 +64,8 @@ jobs:
   image:
     name: Build image
     runs-on: ubuntu-latest
+    outputs:
+      image_digest: ${{ steps.push.outputs.image_digest }}
     permissions:
       contents: read
       id-token: write
@@ -86,8 +92,8 @@ jobs:
               echo "::error::Publishing is restricted to main branch pushes or manual runs"
               exit 1
             fi
-            if [[ ! "$CACHE_REPOSITORY" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ || "$CACHE_REPOSITORY" == "$IMAGE_NAME" || -z "$AWS_REGION" || -z "$ROLE_ARN" ]]; then
-              echo "::error::Publishing requires an ECR region, OIDC role, and separate cache repository"
+            if [[ ( -n "$CACHE_REPOSITORY" && ( ! "$CACHE_REPOSITORY" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ || "$CACHE_REPOSITORY" == "$IMAGE_NAME" ) ) || -z "$AWS_REGION" || -z "$ROLE_ARN" ]]; then
+              echo "::error::Publishing requires an ECR region and OIDC role; a separate cache repository, if configured, must be valid and distinct"
               exit 1
             fi
           elif [[ -n "$REQUESTED_COMMIT" ]]; then
@@ -156,8 +162,10 @@ jobs:
             --label "org.opencontainers.image.revision=${IMAGE_COMMIT}"
           )
           if [[ "$PUSH" == "true" ]]; then
-            cache="${ECR_REGISTRY}/${CACHE_REPOSITORY}"
-            build_args+=(--layers --cache-from "$cache" --cache-to "$cache")
+            if [[ -n "$CACHE_REPOSITORY" ]]; then
+              cache="${ECR_REGISTRY}/${CACHE_REPOSITORY}"
+              build_args+=(--layers --cache-from "$cache" --cache-to "$cache")
+            fi
             if [[ -n "$NODE_IMAGE" ]]; then
               build_args+=(--build-arg "NODE_IMAGE=$NODE_IMAGE")
             fi
@@ -166,11 +174,24 @@ jobs:
 
       - name: Push image to ECR
         if: ${{ inputs.push }}
+        id: push
         env:
           IMAGE_NAME: ${{ inputs.image-name }}
+          AWS_REGION: ${{ inputs.aws-region }}
         shell: bash
         run: |
           set -euo pipefail
           image="${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_COMMIT}"
           podman manifest push --all "localhost/celoria-image:${IMAGE_COMMIT}" "docker://${image}"
-          echo "Pushed ${image}" >> "$GITHUB_STEP_SUMMARY"
+          digest="$(aws ecr describe-images \
+            --region "$AWS_REGION" \
+            --repository-name "$IMAGE_NAME" \
+            --image-ids "imageTag=${IMAGE_COMMIT}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::ECR did not return a valid image digest"
+            exit 1
+          fi
+          echo "image_digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${image} (${digest})" >> "$GITHUB_STEP_SUMMARY"

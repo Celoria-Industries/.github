@@ -1,15 +1,84 @@
 name: Staging promotion gate
 description: Verify reviewed staging-promotion metadata and its immutable source evidence
 inputs:
+  operation:
+    description: Action operation, either verify or prepare-plan-evidence
+    required: false
+    default: verify
   promotion-pr-number:
     description: Merged PR number containing the staging-promotion manifest
-    required: true
+    required: false
+    default: ""
+  verification-mode:
+    description: Verification operation, either promotion or source-pr
+    required: false
+    default: promotion
+  source-pr-number:
+    description: Reviewed source PR number for the isolated Terraform planning workflow
+    required: false
+    default: ""
   expected-manifest-sha:
     description: Expected manifest SHA-256 from the earlier validation job
     required: false
     default: ""
   trusted-image-producer-workflow:
     description: Admin-configured immutable reusable image workflow ref
+    required: false
+    default: ""
+  trusted-plan-producer-workflow:
+    description: Admin-configured immutable reusable Terraform plan workflow ref
+    required: false
+    default: ""
+  plan-artifact-path:
+    description: Downloaded saved Terraform plan file; required for credential-bearing apply validation
+    required: false
+    default: ""
+  evidence-record-path:
+    description: Downloaded signed Terraform evidence JSON; required for credential-bearing apply validation
+    required: false
+    default: ""
+  evidence-signature-path:
+    description: Downloaded KMS signature base64 file; required for credential-bearing apply validation
+    required: false
+    default: ""
+  plan-target-account-id:
+    description: Protected staging member-account ID
+    required: false
+    default: ""
+  plan-target-region:
+    description: Protected staging member-account region
+    required: false
+    default: ""
+  plan-root:
+    description: Protected staging Terraform root path
+    required: false
+    default: ""
+  plan-signing-key-arn:
+    description: Immutable AWS KMS signing key ARN
+    required: false
+    default: ""
+  plan-signing-public-key-der-b64:
+    description: Pinned DER-encoded KMS public key in base64
+    required: false
+    default: ""
+  plan-artifact-id:
+    description: Immutable artifact ID from the trusted plan producer
+    required: false
+    default: ""
+  plan-artifact-digest:
+    description: Immutable GitHub artifact digest from the trusted plan producer
+    required: false
+    default: ""
+  source-pull-request-head-sha:
+    description: Exact reviewed source pull request head
+    required: false
+    default: ""
+  source-pull-request-merge-sha:
+    description: Exact reviewed source pull request merge commit
+    required: false
+    default: ""
+  evidence-output-directory:
+    description: Directory for canonical signed evidence JSON
     required: false
     default: ""
 outputs:
@@ -31,14 +100,63 @@ outputs:
   manifest-sha256:
     description: SHA-256 of the approved promotion manifest
     value: ${{ steps.verify.outputs.manifest_sha256 }}
+  producer-run-id:
+    description: Verified Terraform producer run ID
+    value: ${{ steps.verify.outputs.producer_run_id }}
+  plan-artifact-id:
+    description: Verified immutable Terraform plan artifact ID
+    value: ${{ steps.verify.outputs.plan_artifact_id }}
+  evidence-artifact-id:
+    description: Verified immutable Terraform evidence artifact ID
+    value: ${{ steps.verify.outputs.evidence_artifact_id }}
+  source-pr-number:
+    description: Verified source pull request number
+    value: ${{ steps.verify.outputs.source_pr_number }}
+  source-pull-request-head-sha:
+    description: Exact reviewed source pull request head
+    value: ${{ steps.verify.outputs.source_pull_request_head_sha }}
+  source-pull-request-merge-sha:
+    description: Exact source pull request merge commit
+    value: ${{ steps.verify.outputs.source_pull_request_merge_sha }}
 runs:
   using: composite
   steps:
+    - id: prepare
+      if: inputs.operation == 'prepare-plan-evidence'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SOURCE_PR_NUMBER: ${{ inputs.source-pr-number }}
+        SOURCE_PR_HEAD_SHA: ${{ inputs.source-pull-request-head-sha }}
+        SOURCE_PR_MERGE_SHA: ${{ inputs.source-pull-request-merge-sha }}
+        PLAN_ARTIFACT_ID: ${{ inputs.plan-artifact-id }}
+        PLAN_ARTIFACT_DIGEST: ${{ inputs.plan-artifact-digest }}
+        PLAN_ARTIFACT_PATH: ${{ inputs.plan-artifact-path }}
+        EVIDENCE_OUTPUT_DIRECTORY: ${{ inputs.evidence-output-directory }}
+        STAGING_TRUSTED_PLAN_WORKFLOW: ${{ inputs.trusted-plan-producer-workflow }}
+        STAGING_PLAN_TARGET_ACCOUNT_ID: ${{ inputs.plan-target-account-id }}
+        STAGING_PLAN_TARGET_REGION: ${{ inputs.plan-target-region }}
+        STAGING_PLAN_ROOT: ${{ inputs.plan-root }}
+        STAGING_PLAN_SIGNING_KEY_ARN: ${{ inputs.plan-signing-key-arn }}
+      run: python3 "$GITHUB_ACTION_PATH/create_plan_evidence.py"
+
     - id: verify
+      if: inputs.operation == 'verify'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         PROMOTION_PR_NUMBER: ${{ inputs.promotion-pr-number }}
+        VERIFICATION_MODE: ${{ inputs.verification-mode }}
+        SOURCE_PR_NUMBER: ${{ inputs.source-pr-number }}
         EXPECTED_MANIFEST_SHA: ${{ inputs.expected-manifest-sha }}
         TRUSTED_IMAGE_PRODUCER_WORKFLOW: ${{ inputs.trusted-image-producer-workflow }}
+        TRUSTED_PLAN_PRODUCER_WORKFLOW: ${{ inputs.trusted-plan-producer-workflow }}
+        PLAN_ARTIFACT_PATH: ${{ inputs.plan-artifact-path }}
+        EVIDENCE_RECORD_PATH: ${{ inputs.evidence-record-path }}
+        EVIDENCE_SIGNATURE_PATH: ${{ inputs.evidence-signature-path }}
+        STAGING_PLAN_TARGET_ACCOUNT_ID: ${{ inputs.plan-target-account-id }}
+        STAGING_PLAN_TARGET_REGION: ${{ inputs.plan-target-region }}
+        STAGING_PLAN_ROOT: ${{ inputs.plan-root }}
+        STAGING_PLAN_SIGNING_KEY_ARN: ${{ inputs.plan-signing-key-arn }}
+        STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64: ${{ inputs.plan-signing-public-key-der-b64 }}
       run: python3 "$GITHUB_ACTION_PATH/verify_promotion.py"

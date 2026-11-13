@@ -13,6 +13,7 @@ from verify_promotion import (  # noqa: E402
     validate_promotion_trigger,
     validate_reviewed_pr,
     validate_source_image_run,
+    validate_terraform_manifest,
     validate_supported_kind,
 )
 
@@ -22,6 +23,9 @@ SOURCE_SHA = "b" * 40
 PRODUCER_SHA = "c" * 40
 IMAGE_WORKFLOW_REF = (
     "Celoria-Industries/.github/.github/workflows/container-image.yml@" + PRODUCER_SHA
+)
+PLAN_WORKFLOW_REF = (
+    "Celoria-Industries/.github/.github/workflows/staging-terraform-plan.yml@" + PRODUCER_SHA
 )
 
 
@@ -242,9 +246,57 @@ class StagingPromotionGateTest(unittest.TestCase):
                 IMAGE_WORKFLOW_REF,
             )
 
-    def test_terraform_is_explicitly_disabled_without_private_artifact_provenance(self):
-        with self.assertRaisesRegex(GateError, "GitHub Team plans cannot attest private-repository artifacts"):
-            validate_supported_kind("terraform")
+    def test_terraform_manifest_binds_separate_artifacts_and_target(self):
+        manifest = {
+            "schema_version": 1,
+            "target": "staging",
+            "kind": "terraform",
+            "source": {
+                "repository": "Celoria-Industries/infrastructure-as-code",
+                "commit": "d" * 40,
+                "pull_request_number": 91,
+                "pull_request_head_sha": "a" * 40,
+                "pull_request_merge_sha": "d" * 40,
+                "workflow_run_id": 101,
+                "workflow_run_attempt": 1,
+                "workflow_run_head_sha": "e" * 40,
+                "producer_workflow_ref": PLAN_WORKFLOW_REF,
+                "plan_artifact_id": 102,
+                "plan_artifact_name": "staging-terraform-plan",
+                "plan_artifact_digest": "sha256:" + "1" * 64,
+                "plan_sha256": "sha256:" + "2" * 64,
+                "evidence_artifact_id": 103,
+                "evidence_artifact_name": "staging-terraform-evidence",
+                "evidence_artifact_digest": "sha256:" + "3" * 64,
+                "target_account_id": "123456789012",
+                "target_region": "us-east-2",
+                "terraform_root": "stacks/celoria-industries/staging/foundation",
+                "signing_key_arn": "arn:aws:kms:us-east-2:999999999999:key/12345678-1234-1234-1234-123456789012",
+                "signing_algorithm": "RSASSA_PSS_SHA_256",
+            },
+        }
+        source = validate_terraform_manifest(
+            manifest,
+            "Celoria-Industries/infrastructure-as-code",
+            PLAN_WORKFLOW_REF,
+            {
+                "target_account_id": "123456789012",
+                "target_region": "us-east-2",
+                "terraform_root": "stacks/celoria-industries/staging/foundation",
+                "signing_key_arn": manifest["source"]["signing_key_arn"],
+            },
+        )
+        self.assertEqual(source["plan_artifact_id"], 102)
+        manifest["source"]["evidence_artifact_id"] = manifest["source"]["plan_artifact_id"]
+        with self.assertRaisesRegex(GateError, "must be separate artifacts"):
+            validate_terraform_manifest(
+                manifest,
+                "Celoria-Industries/infrastructure-as-code",
+                PLAN_WORKFLOW_REF,
+                {},
+            )
+        with self.assertRaisesRegex(GateError, "must be image or terraform"):
+            validate_supported_kind("shell")
 
 
 if __name__ == "__main__":

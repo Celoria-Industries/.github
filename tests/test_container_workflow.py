@@ -44,7 +44,6 @@ class ContainerWorkflowTest(unittest.TestCase):
             {"EVENT_NAME": "pull_request"},
             {"REF": "refs/heads/feature"},
             {"CACHE_REPOSITORY": "frontend-template"},
-            {"CACHE_REPOSITORY": ""},
             {"ROLE_ARN": ""},
         ):
             with self.subTest(changes=changes):
@@ -52,6 +51,10 @@ class ContainerWorkflowTest(unittest.TestCase):
                 self.env.update(changes)
                 self.assertNotEqual(self.run_step("Validate publishing inputs").returncode, 0)
                 self.env = original
+
+    def test_publishing_can_skip_unprovisioned_cache(self):
+        self.env["CACHE_REPOSITORY"] = ""
+        self.assertEqual(self.run_step("Validate publishing inputs").returncode, 0)
 
     def test_pull_requests_build_without_aws(self):
         self.env.update({
@@ -110,6 +113,34 @@ class ContainerWorkflowTest(unittest.TestCase):
                         expected.extend(["-f", "./Containerfile", "."])
                         self.assertEqual(args, expected)
                         self.assertFalse(marker.exists())
+
+    def test_push_outputs_the_ecr_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            for name in ("podman", "aws"):
+                executable = path / name
+                if name == "podman":
+                    executable.write_text("#!/bin/bash\nexit 0\n")
+                else:
+                    executable.write_text("#!/bin/bash\nprintf '%s\\n' \"$EXPECTED_DIGEST\"\n")
+                executable.chmod(0o755)
+            digest = "sha256:" + "a" * 64
+            output = path / "output"
+            summary = path / "summary"
+            self.env.update({
+                "PATH": f"{directory}:{self.env['PATH']}",
+                "IMAGE_NAME": "frontend-template",
+                "AWS_REGION": "us-east-2",
+                "IMAGE_COMMIT": "b" * 40,
+                "ECR_REGISTRY": "123456789012.dkr.ecr.us-east-2.amazonaws.com",
+                "EXPECTED_DIGEST": digest,
+                "GITHUB_OUTPUT": str(output),
+                "GITHUB_STEP_SUMMARY": str(summary),
+            })
+            result = self.run_step("Push image to ECR")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_text(), f"image_digest={digest}\n")
+            self.assertIn(digest, summary.read_text())
 
 
 if __name__ == "__main__":
