@@ -1,0 +1,55 @@
+name: Staging promotion gate
+description: Verify reviewed staging-promotion metadata and its immutable source evidence
+inputs:
+  promotion-pr-number:
+    description: Merged PR number containing the staging-promotion manifest
+    required: true
+  expected-manifest-sha:
+    description: Expected manifest SHA-256 from the earlier validation job
+    required: false
+    default: ""
+  trusted-terraform-producer-workflow:
+    description: Admin-configured immutable producer workflow ref for saved plans
+    required: false
+    default: ""
+  terraform-working-directory:
+    description: Admin-configured Terraform directory for the staging environment
+    required: false
+    default: ""
+outputs:
+  promotion-kind:
+    description: Verified promotion operation
+    value: ${{ steps.verify.outputs.promotion_kind }}
+  source-commit:
+    description: Verified source commit
+    value: ${{ steps.verify.outputs.source_commit }}
+  source-repository:
+    description: Verified source repository
+    value: ${{ steps.verify.outputs.source_repository }}
+  image-repository:
+    description: Verified ECR repository for image promotions
+    value: ${{ steps.verify.outputs.image_repository }}
+  image-digest:
+    description: Verified immutable source image digest
+    value: ${{ steps.verify.outputs.image_digest }}
+  plan-sha256:
+    description: Verified saved Terraform plan SHA-256
+    value: ${{ steps.verify.outputs.plan_sha256 }}
+  plan-path:
+    description: Verified saved plan file path on this runner
+    value: ${{ steps.verify.outputs.plan_path }}
+  manifest-sha256:
+    description: SHA-256 of the approved promotion manifest
+    value: ${{ steps.verify.outputs.manifest_sha256 }}
+runs:
+  using: composite
+  steps:
+    - id: verify
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PROMOTION_PR_NUMBER: ${{ inputs.promotion-pr-number }}
+        EXPECTED_MANIFEST_SHA: ${{ inputs.expected-manifest-sha }}
+        TRUSTED_TERRAFORM_PRODUCER_WORKFLOW: ${{ inputs.trusted-terraform-producer-workflow }}
+        TERRAFORM_WORKING_DIRECTORY: ${{ inputs.terraform-working-directory }}
+      run: python3 "$GITHUB_ACTION_PATH/verify_promotion.py"
