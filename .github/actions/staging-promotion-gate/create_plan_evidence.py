@@ -12,6 +12,7 @@ from verify_promotion import (
     repository_file,
     validate_full_sha,
     validate_reviewed_pr,
+    approval_mode,
 )
 
 
@@ -108,6 +109,10 @@ def main():
 
     account_id = required_env("STAGING_PLAN_TARGET_ACCOUNT_ID")
     region = required_env("STAGING_PLAN_TARGET_REGION")
+    if approval_mode() == "solo":
+        require(account_id == required_env("STAGING_SOLO_TARGET_ACCOUNT_ID")
+                and region == required_env("STAGING_SOLO_TARGET_REGION"),
+                "Solo source authorization does not match the Terraform staging target")
     terraform_root = required_env("STAGING_PLAN_ROOT")
     key_arn = required_env("STAGING_PLAN_SIGNING_KEY_ARN")
     require(re.fullmatch(r"[0-9]{12}", account_id) is not None,

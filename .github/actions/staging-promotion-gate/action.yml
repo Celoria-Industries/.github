@@ -81,6 +81,74 @@ inputs:
     description: Directory for canonical signed evidence JSON
     required: false
     default: ""
+  approval-mode:
+    description: Protected configuration selecting independent or solo authorization
+    required: false
+    default: independent
+  solo-authorizer-id:
+    description: Protected immutable GitHub user ID
+    required: false
+    default: ""
+  solo-max-age-seconds:
+    description: Protected maximum age of each solo authorization, at most 86400 seconds
+    required: false
+    default: ""
+  solo-source-comment-id:
+    description: Source PR authorization comment ID
+    required: false
+    default: ""
+  solo-promotion-comment-id:
+    description: Promotion PR authorization comment ID
+    required: false
+    default: ""
+  solo-target-account-id:
+    description: Protected staging target account ID
+    required: false
+    default: ""
+  solo-target-region:
+    description: Protected staging target region
+    required: false
+    default: ""
+  staging-ecr-registry:
+    description: Protected staging destination ECR registry
+    required: false
+    default: ""
+  ledger-role-arn:
+    description: Protected audit-only ledger role ARN
+    required: false
+    default: ""
+  ledger-table-arn:
+    description: Protected authorization consumption table ARN
+    required: false
+    default: ""
+  verified-manifest-sha:
+    description: Manifest SHA-256 from the immediately preceding verifier
+    required: false
+    default: ""
+  verified-promotion-head-sha:
+    description: Promotion PR head from the immediately preceding verifier
+    required: false
+    default: ""
+  verified-source-pr-number:
+    description: Source PR number from the immediately preceding verifier
+    required: false
+    default: ""
+  verified-source-head-sha:
+    description: Source PR head from the immediately preceding verifier
+    required: false
+    default: ""
+  verified-authorized-at:
+    description: Authorization creation timestamp from the immediately preceding verifier
+    required: false
+    default: ""
+  verified-source-authorized-at:
+    description: Source authorization creation timestamp from the immediately preceding verifier
+    required: false
+    default: ""
+  verified-target-resource:
+    description: Staging target resource from the immediately preceding verifier
+    required: false
+    default: ""
 outputs:
   promotion-kind:
     description: Verified promotion operation
@@ -109,6 +177,21 @@ outputs:
   evidence-artifact-id:
     description: Verified immutable Terraform evidence artifact ID
     value: ${{ steps.verify.outputs.evidence_artifact_id }}
+  approval-mode:
+    description: Verified staging authorization mode
+    value: ${{ steps.verify.outputs.approval_mode }}
+  promotion-head-sha:
+    description: Exact promotion PR head SHA
+    value: ${{ steps.verify.outputs.promotion_head_sha }}
+  solo-authorization-created-at:
+    description: GitHub timestamp of the solo promotion authorization
+    value: ${{ steps.verify.outputs.solo_authorization_created_at }}
+  solo-source-authorization-created-at:
+    description: GitHub timestamp of the solo source authorization
+    value: ${{ steps.verify.outputs.solo_source_authorization_created_at }}
+  solo-target-resource:
+    description: Authorized staging resource
+    value: ${{ steps.verify.outputs.solo_target_resource }}
   source-pr-number:
     description: Verified source pull request number
     value: ${{ steps.verify.outputs.source_pr_number }}
@@ -121,6 +204,27 @@ outputs:
 runs:
   using: composite
   steps:
+    - id: consume
+      if: inputs.operation == 'consume-solo'
+      shell: bash
+      env:
+        STAGING_SOLO_LEDGER_ROLE_ARN: ${{ inputs.ledger-role-arn }}
+        STAGING_SOLO_LEDGER_TABLE_ARN: ${{ inputs.ledger-table-arn }}
+        STAGING_SOLO_SOURCE_COMMENT_ID: ${{ inputs.solo-source-comment-id }}
+        STAGING_SOLO_PROMOTION_COMMENT_ID: ${{ inputs.solo-promotion-comment-id }}
+        STAGING_SOLO_AUTHORIZER_ID: ${{ inputs.solo-authorizer-id }}
+        STAGING_SOLO_TARGET_ACCOUNT_ID: ${{ inputs.solo-target-account-id }}
+        STAGING_SOLO_TARGET_REGION: ${{ inputs.solo-target-region }}
+        PROMOTION_PR_NUMBER: ${{ inputs.promotion-pr-number }}
+        MANIFEST_SHA256: ${{ inputs.verified-manifest-sha }}
+        PROMOTION_HEAD_SHA: ${{ inputs.verified-promotion-head-sha }}
+        SOURCE_PR_NUMBER: ${{ inputs.verified-source-pr-number }}
+        SOURCE_HEAD_SHA: ${{ inputs.verified-source-head-sha }}
+        AUTHORIZED_AT: ${{ inputs.verified-authorized-at }}
+        SOURCE_AUTHORIZED_AT: ${{ inputs.verified-source-authorized-at }}
+        TARGET_RESOURCE: ${{ inputs.verified-target-resource }}
+      run: python3 "$GITHUB_ACTION_PATH/consume_solo.py"
+
     - id: prepare
       if: inputs.operation == 'prepare-plan-evidence'
       shell: bash
@@ -138,6 +242,12 @@ runs:
         STAGING_PLAN_TARGET_REGION: ${{ inputs.plan-target-region }}
         STAGING_PLAN_ROOT: ${{ inputs.plan-root }}
         STAGING_PLAN_SIGNING_KEY_ARN: ${{ inputs.plan-signing-key-arn }}
+        STAGING_APPROVAL_MODE: ${{ inputs.approval-mode }}
+        STAGING_SOLO_AUTHORIZER_ID: ${{ inputs.solo-authorizer-id }}
+        STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS: ${{ inputs.solo-max-age-seconds }}
+        STAGING_SOLO_SOURCE_COMMENT_ID: ${{ inputs.solo-source-comment-id }}
+        STAGING_SOLO_TARGET_ACCOUNT_ID: ${{ inputs.solo-target-account-id }}
+        STAGING_SOLO_TARGET_REGION: ${{ inputs.solo-target-region }}
       run: python3 "$GITHUB_ACTION_PATH/create_plan_evidence.py"
 
     - id: verify
@@ -159,4 +269,12 @@ runs:
         STAGING_PLAN_ROOT: ${{ inputs.plan-root }}
         STAGING_PLAN_SIGNING_KEY_ARN: ${{ inputs.plan-signing-key-arn }}
         STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64: ${{ inputs.plan-signing-public-key-der-b64 }}
+        STAGING_APPROVAL_MODE: ${{ inputs.approval-mode }}
+        STAGING_SOLO_AUTHORIZER_ID: ${{ inputs.solo-authorizer-id }}
+        STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS: ${{ inputs.solo-max-age-seconds }}
+        STAGING_SOLO_SOURCE_COMMENT_ID: ${{ inputs.solo-source-comment-id }}
+        STAGING_SOLO_PROMOTION_COMMENT_ID: ${{ inputs.solo-promotion-comment-id }}
+        STAGING_SOLO_TARGET_ACCOUNT_ID: ${{ inputs.solo-target-account-id }}
+        STAGING_SOLO_TARGET_REGION: ${{ inputs.solo-target-region }}
+        STAGING_ECR_REGISTRY: ${{ inputs.staging-ecr-registry }}
       run: python3 "$GITHUB_ACTION_PATH/verify_promotion.py"

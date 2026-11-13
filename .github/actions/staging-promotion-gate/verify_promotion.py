@@ -9,6 +9,7 @@ import urllib.parse
 import urllib.request
 
 from plan_evidence import EvidenceError, strict_record, verify_plan_bytes, verify_plan_evidence
+from solo_approval import SoloApprovalError, verify_comment
 
 
 MANIFEST_PATH = ".github/staging-promotion.json"
@@ -128,6 +129,41 @@ def validate_repo(value, label):
     return value
 
 
+def approval_mode():
+    mode = os.environ.get("STAGING_APPROVAL_MODE", "") or "independent"
+    require(mode in ("independent", "solo"), "Invalid staging approval mode")
+    return mode
+
+
+def verify_solo_pr(api, repository, number, head_sha, purpose, extras=None):
+    repo_id = parse_positive_int(os.environ.get("GITHUB_REPOSITORY_ID"), "GITHUB_REPOSITORY_ID")
+    author_id = parse_positive_int(os.environ.get("STAGING_SOLO_AUTHORIZER_ID"), "STAGING_SOLO_AUTHORIZER_ID")
+    max_age = parse_positive_int(os.environ.get("STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS"), "STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS")
+    comment_id = parse_positive_int(
+        os.environ.get(f"STAGING_SOLO_{purpose.upper()}_COMMENT_ID"), f"{purpose} authorization comment ID"
+    )
+    account = os.environ.get("STAGING_SOLO_TARGET_ACCOUNT_ID", "")
+    region = os.environ.get("STAGING_SOLO_TARGET_REGION", "")
+    require(re.fullmatch(r"[0-9]{12}", account) is not None, "Invalid solo staging target account")
+    require(re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-[0-9]", region) is not None, "Invalid solo staging target region")
+    expected = {
+        "schema_version": 1,
+        "type": purpose,
+        "repository_id": repo_id,
+        "pull_request": number,
+        "head_sha": head_sha,
+        "target": "staging",
+        "account_id": account,
+        "region": region,
+    }
+    if extras:
+        expected.update(extras)
+    try:
+        return verify_comment(api, repository, repo_id, comment_id, author_id, max_age, expected)
+    except SoloApprovalError as error:
+        raise GateError(str(error)) from error
+
+
 def validate_reviewed_pr(api, repository, number, required_head=None, promotion=False):
     pr = api.get(f"/repos/{repository}/pulls/{number}")
     require(pr.get("state") == "closed" and pr.get("merged_at"), f"PR #{number} is not merged")
@@ -159,7 +195,10 @@ def validate_reviewed_pr(api, repository, number, required_head=None, promotion=
         != (pr.get("user") or {}).get("login", "").lower()
         for review in latest.values()
     )
-    require(approved, f"PR #{number} lacks a current human approval on its exact head")
+    if approval_mode() == "independent":
+        require(approved, f"PR #{number} lacks a current human approval on its exact head")
+    elif not promotion:
+        verify_solo_pr(api, repository, number, head_sha, "source")
 
     check_runs = []
     for page in range(1, 101):
@@ -270,7 +309,7 @@ def repository_file(api, repository, path, ref):
 
 
 def validate_source_image_run(api, repository, source, trusted_workflow):
-    validate_reviewed_source_commit(api, repository, source["commit"])
+    source_pr = validate_reviewed_source_commit(api, repository, source["commit"])
     run = api.get(
         f'/repos/{repository}/actions/runs/{source["workflow_run_id"]}'
         f'/attempts/{source["workflow_run_attempt"]}'
@@ -294,6 +333,7 @@ def validate_source_image_run(api, repository, source, trusted_workflow):
     has_run_step = re.search(r"(?m)^[ \t]*(?:-\s*)?run\s*:", wrapper) is not None
     require(uses == [trusted_workflow] and not has_run_step,
             "Source workflow must only call the pinned reusable image workflow, with no run steps")
+    return source_pr
 
 
 def validate_reviewed_source_commit(api, repository, source_commit):
@@ -573,6 +613,10 @@ def main():
         repository = validate_repo(os.environ.get("GITHUB_REPOSITORY"), "GITHUB_REPOSITORY")
         require(repository == PLAN_REPOSITORY,
                 f"Terraform plan producer is restricted to {PLAN_REPOSITORY}")
+        if approval_mode() == "solo":
+            require(os.environ.get("STAGING_PLAN_TARGET_ACCOUNT_ID") == os.environ.get("STAGING_SOLO_TARGET_ACCOUNT_ID")
+                    and os.environ.get("STAGING_PLAN_TARGET_REGION") == os.environ.get("STAGING_SOLO_TARGET_REGION"),
+                    "Solo source authorization does not match the Terraform staging target")
         pr_number = parse_positive_int(os.environ.get("SOURCE_PR_NUMBER"), "source-pr-number")
         api = GitHubApi()
         source_pr, head_sha = validate_reviewed_pr(api, repository, pr_number)
@@ -609,10 +653,23 @@ def main():
     manifest = strict_json(manifest_bytes, MANIFEST_PATH)
     kind = manifest.get("kind") if isinstance(manifest, dict) else None
     validate_supported_kind(kind)
+    solo_created = ""
+    target_resource = ""
     if kind == "image":
         trusted_workflow = os.environ.get("TRUSTED_IMAGE_PRODUCER_WORKFLOW", "")
         source, _ = validate_image_manifest(manifest, repository, trusted_workflow)
-        validate_source_image_run(api, repository, source, trusted_workflow)
+        source_pr = validate_source_image_run(api, repository, source, trusted_workflow)
+        if approval_mode() == "solo":
+            registry = os.environ.get("STAGING_ECR_REGISTRY", "")
+            account = os.environ.get("STAGING_SOLO_TARGET_ACCOUNT_ID", "")
+            region = os.environ.get("STAGING_SOLO_TARGET_REGION", "")
+            require(registry == f"{account}.dkr.ecr.{region}.amazonaws.com",
+                    "Solo image registry does not match the authorized staging account and region")
+            target_resource = f"{registry}/{source['image_repository']}"
+            solo_created = verify_solo_pr(api, repository, pr_number, head_sha, "promotion", {
+                "manifest_sha256": f"sha256:{manifest_sha}",
+                "target_resource": target_resource,
+            })
         outputs = {
             "promotion_kind": kind,
             "source_commit": source["commit"],
@@ -631,7 +688,16 @@ def main():
         }
         require(all(expected.values()), "Staging Terraform target, root, and signing key must be configured")
         source = validate_terraform_manifest(manifest, repository, trusted_workflow, expected)
-        validate_source_terraform_run(api, repository, source, trusted_workflow)
+        if approval_mode() == "solo":
+            require(source["target_account_id"] == os.environ.get("STAGING_SOLO_TARGET_ACCOUNT_ID")
+                    and source["target_region"] == os.environ.get("STAGING_SOLO_TARGET_REGION"),
+                    "Solo authorization target does not match the Terraform target")
+            target_resource = source["terraform_root"]
+            solo_created = verify_solo_pr(api, repository, pr_number, head_sha, "promotion", {
+                "manifest_sha256": f"sha256:{manifest_sha}",
+                "target_resource": target_resource,
+            })
+        source_pr = validate_source_terraform_run(api, repository, source, trusted_workflow)
         verify_local_terraform_artifacts(source, expected)
         outputs = {
             "promotion_kind": kind,
@@ -645,6 +711,19 @@ def main():
             "evidence_artifact_id": source["evidence_artifact_id"],
         }
 
+    outputs["approval_mode"] = approval_mode()
+    outputs["promotion_head_sha"] = head_sha
+    outputs["source_pr_number"] = source_pr["number"]
+    outputs["source_pull_request_head_sha"] = source_pr["head"]["sha"]
+    outputs["solo_authorization_created_at"] = solo_created
+    outputs["solo_target_resource"] = target_resource
+    outputs["solo_source_authorization_created_at"] = (
+        verify_solo_pr(api, repository, source_pr["number"], source_pr["head"]["sha"], "source")
+        if approval_mode() == "solo" else ""
+    )
+    if approval_mode() == "solo":
+        require(outputs["solo_source_authorization_created_at"] <= solo_created,
+                "Promotion authorization must not predate source authorization")
     write_outputs(outputs)
     print(f"Verified {kind} staging promotion in PR #{pr_number} at {head_sha}")
 
