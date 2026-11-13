@@ -8,12 +8,8 @@ inputs:
     description: Expected manifest SHA-256 from the earlier validation job
     required: false
     default: ""
-  trusted-terraform-producer-workflow:
-    description: Admin-configured immutable producer workflow ref for saved plans
-    required: false
-    default: ""
-  terraform-working-directory:
-    description: Admin-configured Terraform directory for the staging environment
+  trusted-image-producer-workflow:
+    description: Admin-configured immutable reusable image workflow ref
     required: false
     default: ""
 outputs:
@@ -32,12 +28,6 @@ outputs:
   image-digest:
     description: Verified immutable source image digest
     value: ${{ steps.verify.outputs.image_digest }}
-  plan-sha256:
-    description: Verified saved Terraform plan SHA-256
-    value: ${{ steps.verify.outputs.plan_sha256 }}
-  plan-path:
-    description: Verified saved plan file path on this runner
-    value: ${{ steps.verify.outputs.plan_path }}
   manifest-sha256:
     description: SHA-256 of the approved promotion manifest
     value: ${{ steps.verify.outputs.manifest_sha256 }}
@@ -50,6 +40,5 @@ runs:
         GH_TOKEN: ${{ github.token }}
         PROMOTION_PR_NUMBER: ${{ inputs.promotion-pr-number }}
         EXPECTED_MANIFEST_SHA: ${{ inputs.expected-manifest-sha }}
-        TRUSTED_TERRAFORM_PRODUCER_WORKFLOW: ${{ inputs.trusted-terraform-producer-workflow }}
-        TERRAFORM_WORKING_DIRECTORY: ${{ inputs.terraform-working-directory }}
+        TRUSTED_IMAGE_PRODUCER_WORKFLOW: ${{ inputs.trusted-image-producer-workflow }}
       run: python3 "$GITHUB_ACTION_PATH/verify_promotion.py"

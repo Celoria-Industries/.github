@@ -1,23 +1,16 @@
 import base64
-from datetime import datetime
 import hashlib
 import json
 import os
-from pathlib import PurePosixPath
 import re
-import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
 
 
 MANIFEST_PATH = ".github/staging-promotion.json"
 IMAGE_WORKFLOW_PATH = ".github/workflows/container-image.yml"
-PLAN_ARTIFACT_NAME = "staging-tfplan"
-MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
 
 
 class GateError(Exception):
@@ -102,47 +95,6 @@ class GitHubApi:
             if len(items) < 100:
                 return result
         fail("GitHub API list exceeded the 10,000-item safety limit")
-
-    def download(self, path, destination):
-        url = urllib.parse.urljoin(self.base + "/", path.lstrip("/"))
-        require(urllib.parse.urlsplit(url)[:2] == self.base_origin, "GitHub artifact URL escaped its configured host")
-        try:
-            response = self._request_without_redirect(url)
-        except urllib.error.HTTPError as error:
-            if error.code not in (301, 302, 303, 307, 308):
-                fail(f"GitHub artifact download failed ({error.code})")
-            location = error.headers.get("Location")
-            require(location is not None, "Artifact download redirect has no location")
-            parsed = urllib.parse.urlsplit(location)
-            require(parsed.scheme == "https" and parsed.hostname, "Artifact download redirect is not HTTPS")
-            response = urllib.request.urlopen(
-                urllib.request.Request(location, headers={"User-Agent": "Celoria-Staging-Promotion-Gate"}),
-                timeout=60,
-            )
-        total = 0
-        with response, open(destination, "wb") as target:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                require(total <= MAX_ARTIFACT_BYTES, "Saved-plan artifact exceeds the 1 GiB safety limit")
-                target.write(chunk)
-
-    def _request_without_redirect(self, url):
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, request, response, code, message, headers, new_url):
-                return None
-
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "Celoria-Staging-Promotion-Gate",
-            "Authorization": f"Bearer {self.token}",
-        }
-        opener = urllib.request.build_opener(NoRedirect)
-        return opener.open(urllib.request.Request(url, headers=headers), timeout=30)
-
 
 def parse_positive_int(value, label):
     try:
@@ -241,14 +193,22 @@ def require_object(value, required_keys, label):
     return value
 
 
-def validate_image_manifest(manifest, repository):
+def validate_image_manifest(manifest, repository, trusted_workflow):
     require_object(manifest, ("schema_version", "target", "kind", "source", "destination"), "manifest")
     require(manifest["schema_version"] == 1, "Unsupported promotion manifest schema_version")
     require(manifest["target"] == "staging" and manifest["kind"] == "image",
             "Image promotion manifest must target staging")
     source = require_object(
         manifest["source"],
-        ("repository", "commit", "workflow_run_id", "workflow_run_attempt", "image_repository", "image_digest"),
+        (
+            "repository",
+            "commit",
+            "workflow_run_id",
+            "workflow_run_attempt",
+            "image_repository",
+            "image_digest",
+            "producer_workflow_ref",
+        ),
         "source",
     )
     require(validate_repo(source["repository"], "source.repository") == repository,
@@ -259,6 +219,16 @@ def validate_image_manifest(manifest, repository):
         source["workflow_run_attempt"], "source.workflow_run_attempt"
     )
     validate_digest(source["image_digest"], "source.image_digest")
+    require(
+        isinstance(trusted_workflow, str)
+        and re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/container-image\.yml@[0-9a-f]{40}",
+            trusted_workflow,
+        ) is not None,
+        "STAGING_TRUSTED_IMAGE_WORKFLOW must pin container-image.yml to a full commit SHA",
+    )
+    require(source["producer_workflow_ref"] == trusted_workflow,
+            "Image producer does not match the admin-configured immutable workflow")
     validate_image_name(source["image_repository"], "source.image_repository")
     destination = require_object(manifest["destination"], ("image_repository",), "destination")
     validate_image_name(destination["image_repository"], "destination.image_repository")
@@ -279,60 +249,27 @@ def validate_promotion_trigger(event_name, ref):
     )
 
 
-def validate_plan_manifest(manifest, repository, trusted_workflow, terraform_directory):
-    require_object(manifest, ("schema_version", "target", "kind", "source", "destination"), "manifest")
-    require(manifest["schema_version"] == 1, "Unsupported promotion manifest schema_version")
-    require(manifest["target"] == "staging" and manifest["kind"] == "terraform",
-            "Terraform promotion manifest must target staging")
-    source = require_object(
-        manifest["source"],
-        (
-            "repository",
-            "commit",
-            "pull_request_number",
-            "workflow_run_id",
-            "workflow_run_attempt",
-            "artifact_id",
-            "artifact_name",
-            "artifact_digest",
-            "plan_sha256",
-            "producer_workflow",
-        ),
-        "source",
-    )
-    require(validate_repo(source["repository"], "source.repository") == repository,
-            "Terraform source repository must match the caller repository")
-    validate_full_sha(source["commit"], "source.commit")
-    source["pull_request_number"] = parse_positive_int(
-        source["pull_request_number"], "source.pull_request_number"
-    )
-    source["workflow_run_id"] = parse_positive_int(source["workflow_run_id"], "source.workflow_run_id")
-    source["workflow_run_attempt"] = parse_positive_int(
-        source["workflow_run_attempt"], "source.workflow_run_attempt"
-    )
-    source["artifact_id"] = parse_positive_int(source["artifact_id"], "source.artifact_id")
-    require(source["artifact_name"] == PLAN_ARTIFACT_NAME,
-            f"Terraform artifact_name must be {PLAN_ARTIFACT_NAME}")
-    validate_digest(source["artifact_digest"], "source.artifact_digest")
-    validate_digest(source["plan_sha256"], "source.plan_sha256")
-    producer = require_object(source["producer_workflow"], ("path", "sha"), "source.producer_workflow")
-    require(isinstance(producer["path"], str) and re.fullmatch(
-        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_.-]+\.yml",
-        producer["path"],
-    ), "source.producer_workflow.path must identify a GitHub Actions workflow")
-    validate_full_sha(producer["sha"], "source.producer_workflow.sha")
-    require(f'{producer["path"]}@{producer["sha"]}' == trusted_workflow,
-            "Terraform producer does not match the admin-configured immutable workflow")
-    destination = require_object(manifest["destination"], ("working_directory",), "destination")
-    require(destination["working_directory"] == terraform_directory and bool(terraform_directory),
-            "Terraform destination must match STAGING_TERRAFORM_WORKING_DIRECTORY")
-    path = PurePosixPath(destination["working_directory"])
-    require(not path.is_absolute() and ".." not in path.parts,
-            "Terraform destination working_directory must stay inside the repository")
-    return source, destination
+def validate_supported_kind(kind):
+    if kind == "terraform":
+        fail(
+            "Terraform staging promotion is disabled: GitHub Team plans cannot attest private-repository "
+            "artifacts; a different trusted plan-provenance mechanism must be implemented and verified"
+        )
+    require(kind == "image", "Promotion manifest kind must be image")
 
 
-def validate_source_image_run(api, repository, source):
+def repository_file(api, repository, path, ref):
+    encoded_path = urllib.parse.quote(path, safe="/")
+    response = api.get(f"/repos/{repository}/contents/{encoded_path}?ref={ref}")
+    require(response.get("encoding") == "base64" and isinstance(response.get("content"), str),
+            f"{path} could not be read as base64")
+    try:
+        return base64.b64decode(response["content"].replace("\n", ""), validate=True).decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as error:
+        raise GateError(f"{path} contains invalid base64 or UTF-8 content") from error
+
+
+def validate_source_image_run(api, repository, source, trusted_workflow):
     run = api.get(
         f'/repos/{repository}/actions/runs/{source["workflow_run_id"]}'
         f'/attempts/{source["workflow_run_attempt"]}'
@@ -344,83 +281,13 @@ def validate_source_image_run(api, repository, source):
     require(run.get("head_sha") == source["commit"], "Source image workflow commit does not match the manifest")
     require(run.get("run_attempt") == source["workflow_run_attempt"], "Source image run attempt does not match")
     require(run.get("path") == IMAGE_WORKFLOW_PATH, "Source image run used an unexpected workflow")
-
-
-def validate_plan_run_and_artifact(api, repository, source, plan_path):
-    source_pr, _ = validate_reviewed_pr(
-        api, repository, source["pull_request_number"], required_head=source["commit"]
-    )
-    run = api.get(
-        f'/repos/{repository}/actions/runs/{source["workflow_run_id"]}'
-        f'/attempts/{source["workflow_run_attempt"]}'
-    )
-    require(run.get("status") == "completed" and run.get("conclusion") == "success",
-            "Terraform plan workflow run did not complete successfully")
-    require(run.get("event") == "pull_request" and run.get("head_sha") == source["commit"],
-            "Terraform plan run must be from the exact reviewed source PR commit")
-    require(run.get("run_attempt") == source["workflow_run_attempt"], "Terraform plan run attempt does not match")
-    require(any(
-        pull.get("number") == source["pull_request_number"]
-        and pull.get("head", {}).get("sha") == source["commit"]
-        and pull.get("base", {}).get("ref") == "main"
-        for pull in run.get("pull_requests", [])
-    ), "Terraform plan run is not associated with the reviewed source PR")
-
-    artifact = api.get(f'/repos/{repository}/actions/artifacts/{source["artifact_id"]}')
-    require(not artifact.get("expired"), "Terraform plan artifact has expired")
-    require(artifact.get("name") == PLAN_ARTIFACT_NAME, "Terraform plan artifact name does not match")
-    require(artifact.get("digest") == source["artifact_digest"], "Terraform artifact digest does not match")
-    run_info = artifact.get("workflow_run") or {}
-    require(run_info.get("id") == source["workflow_run_id"]
-            and run_info.get("head_sha") == source["commit"],
-            "Terraform artifact is not from the specified source run and commit")
-    try:
-        artifact_created = datetime.fromisoformat(artifact["created_at"].replace("Z", "+00:00"))
-        attempt_started = datetime.fromisoformat(run["run_started_at"].replace("Z", "+00:00"))
-        attempt_updated = datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
-    except (KeyError, TypeError, ValueError) as error:
-        raise GateError("GitHub API did not provide timestamps to bind the artifact to its run attempt") from error
-    require(attempt_started <= artifact_created <= attempt_updated,
-            "Terraform artifact was not created during the specified workflow run attempt")
-
-    with tempfile.TemporaryDirectory(prefix="celoria-plan-") as directory:
-        archive = os.path.join(directory, "artifact.zip")
-        api.download(f'/repos/{repository}/actions/artifacts/{source["artifact_id"]}/zip', archive)
-        with open(archive, "rb") as artifact_file:
-            digest = hashlib.sha256()
-            while True:
-                chunk = artifact_file.read(1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-            archive_digest = "sha256:" + digest.hexdigest()
-        require(archive_digest == source["artifact_digest"], "Downloaded Terraform artifact digest does not match")
-        with zipfile.ZipFile(archive) as zipped:
-            members = [member for member in zipped.infolist() if not member.is_dir()]
-            require(len(members) == 1 and members[0].filename == "tfplan",
-                    "Terraform artifact must contain exactly one file named tfplan")
-            plan = zipped.read(members[0])
-        plan_digest = "sha256:" + hashlib.sha256(plan).hexdigest()
-        require(plan_digest == source["plan_sha256"], "Saved Terraform plan SHA-256 does not match")
-        os.makedirs(os.path.dirname(plan_path), exist_ok=True)
-        with open(plan_path, "wb") as plan_file:
-            plan_file.write(plan)
-
-    producer = source["producer_workflow"]
-    command = [
-        "gh", "attestation", "verify", plan_path,
-        "--repo", repository,
-        "--signer-workflow", producer["path"],
-        "--signer-digest", producer["sha"],
-        "--source-digest", source["commit"],
-    ]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-    except FileNotFoundError as error:
-        raise GateError("GitHub CLI with attestation verification is required") from error
-    require(result.returncode == 0,
-            f"Saved Terraform plan attestation verification failed: {result.stderr.strip()}")
-    return source_pr
+    require(source["producer_workflow_ref"] == trusted_workflow,
+            "Image producer does not match the admin-configured immutable workflow")
+    wrapper = repository_file(api, repository, IMAGE_WORKFLOW_PATH, source["commit"])
+    uses = re.findall(r"(?m)^\s+uses:\s*([^\s#]+)\s*(?:#.*)?$", wrapper)
+    has_run_step = re.search(r"(?m)^[ \t]*(?:-\s*)?run\s*:", wrapper) is not None
+    require(uses == [trusted_workflow] and not has_run_step,
+            "Source workflow must only call the pinned reusable image workflow, with no run steps")
 
 
 def write_outputs(values):
@@ -456,25 +323,11 @@ def main():
             "Promotion manifest changed after the initial verification")
     manifest = strict_json(manifest_bytes, MANIFEST_PATH)
     kind = manifest.get("kind") if isinstance(manifest, dict) else None
-    source = None
-    destination = None
-    plan_path = ""
+    validate_supported_kind(kind)
     if kind == "image":
-        source, destination = validate_image_manifest(manifest, repository)
-        validate_source_image_run(api, repository, source)
-    elif kind == "terraform":
-        source, destination = validate_plan_manifest(
-            manifest,
-            repository,
-            os.environ.get("TRUSTED_TERRAFORM_PRODUCER_WORKFLOW", ""),
-            os.environ.get("TERRAFORM_WORKING_DIRECTORY", ""),
-        )
-        plan_path = os.path.join(
-            tempfile.gettempdir(), f"celoria-staging-tfplan-{pr_number}-{source['artifact_id']}"
-        )
-        validate_plan_run_and_artifact(api, repository, source, plan_path)
-    else:
-        fail("Promotion manifest kind must be image or terraform")
+        trusted_workflow = os.environ.get("TRUSTED_IMAGE_PRODUCER_WORKFLOW", "")
+        source, _ = validate_image_manifest(manifest, repository, trusted_workflow)
+        validate_source_image_run(api, repository, source, trusted_workflow)
 
     write_outputs({
         "promotion_kind": kind,
@@ -482,8 +335,6 @@ def main():
         "source_repository": source["repository"],
         "image_repository": source.get("image_repository", ""),
         "image_digest": source.get("image_digest", ""),
-        "plan_sha256": source.get("plan_sha256", ""),
-        "plan_path": plan_path,
         "manifest_sha256": manifest_sha,
     })
     print(f"Verified {kind} staging promotion in PR #{pr_number} at {head_sha}")

@@ -10,15 +10,19 @@ sys.path.insert(0, str(ROOT / ".github/actions/staging-promotion-gate"))
 from verify_promotion import (  # noqa: E402
     GateError,
     validate_image_manifest,
-    validate_plan_manifest,
     validate_promotion_trigger,
     validate_reviewed_pr,
+    validate_source_image_run,
+    validate_supported_kind,
 )
 
 
 HEAD_SHA = "a" * 40
 SOURCE_SHA = "b" * 40
 PRODUCER_SHA = "c" * 40
+IMAGE_WORKFLOW_REF = (
+    "Celoria-Industries/.github/.github/workflows/container-image.yml@" + PRODUCER_SHA
+)
 
 
 def pr(review_head=HEAD_SHA):
@@ -161,10 +165,11 @@ class StagingPromotionGateTest(unittest.TestCase):
                 "workflow_run_attempt": 1,
                 "image_repository": "service",
                 "image_digest": "sha256:" + "1" * 64,
+                "producer_workflow_ref": IMAGE_WORKFLOW_REF,
             },
             "destination": {"image_repository": "service"},
         }
-        source, destination = validate_image_manifest(manifest, "celoria/service")
+        source, destination = validate_image_manifest(manifest, "celoria/service", IMAGE_WORKFLOW_REF)
         self.assertEqual(source["image_digest"], manifest["source"]["image_digest"])
         self.assertEqual(destination["image_repository"], "service")
 
@@ -180,49 +185,66 @@ class StagingPromotionGateTest(unittest.TestCase):
                 "workflow_run_attempt": 1,
                 "image_repository": "service",
                 "image_digest": "sha256:" + "1" * 64,
+                "producer_workflow_ref": IMAGE_WORKFLOW_REF,
             },
             "destination": {"image_repository": "service"},
         }
         with self.assertRaisesRegex(GateError, "target staging"):
-            validate_image_manifest(manifest, "celoria/service")
+            validate_image_manifest(manifest, "celoria/service", IMAGE_WORKFLOW_REF)
         manifest["target"] = "staging"
         manifest["destination"]["image_repository"] = "other"
         with self.assertRaisesRegex(GateError, "must match"):
-            validate_image_manifest(manifest, "celoria/service")
-
-    def test_terraform_manifest_requires_admin_pinned_producer_and_workspace(self):
-        producer = f"Celoria-Industries/.github/.github/workflows/terraform-plan.yml@{PRODUCER_SHA}"
-        manifest = {
-            "schema_version": 1,
-            "target": "staging",
-            "kind": "terraform",
-            "source": {
-                "repository": "celoria/infra",
-                "commit": SOURCE_SHA,
-                "pull_request_number": 18,
-                "workflow_run_id": 456,
-                "workflow_run_attempt": 2,
-                "artifact_id": 789,
-                "artifact_name": "staging-tfplan",
-                "artifact_digest": "sha256:" + "1" * 64,
-                "plan_sha256": "sha256:" + "2" * 64,
-                "producer_workflow": {
-                    "path": "Celoria-Industries/.github/.github/workflows/terraform-plan.yml",
-                    "sha": PRODUCER_SHA,
-                },
-            },
-            "destination": {"working_directory": "terraform/staging"},
-        }
-        source, destination = validate_plan_manifest(
-            manifest, "celoria/infra", producer, "terraform/staging"
-        )
-        self.assertEqual(source["artifact_id"], 789)
-        self.assertEqual(destination["working_directory"], "terraform/staging")
+            validate_image_manifest(manifest, "celoria/service", IMAGE_WORKFLOW_REF)
+        manifest["destination"]["image_repository"] = "service"
+        manifest["source"]["producer_workflow_ref"] = IMAGE_WORKFLOW_REF.replace(PRODUCER_SHA, "main")
         with self.assertRaisesRegex(GateError, "admin-configured immutable workflow"):
-            validate_plan_manifest(
-                manifest, "celoria/infra", "Celoria-Industries/.github/terraform-plan@main",
-                "terraform/staging",
+            validate_image_manifest(manifest, "celoria/service", IMAGE_WORKFLOW_REF)
+
+    def test_verifies_image_run_and_rejects_caller_steps(self):
+        run = {
+            "status": "completed",
+            "conclusion": "success",
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": SOURCE_SHA,
+            "run_attempt": 1,
+            "path": ".github/workflows/container-image.yml",
+        }
+
+        class SourceApi:
+            def __init__(self, wrapper):
+                self.wrapper = wrapper
+
+            def get(self, path):
+                if path == "/repos/celoria/service/actions/runs/123/attempts/1":
+                    return run
+                if path == f"/repos/celoria/service/contents/.github/workflows/container-image.yml?ref={SOURCE_SHA}":
+                    import base64
+                    return {
+                        "encoding": "base64",
+                        "content": base64.b64encode(self.wrapper.encode()).decode(),
+                    }
+                raise AssertionError(f"Unexpected API request: {path}")
+
+        source = {
+            "commit": SOURCE_SHA,
+            "workflow_run_id": 123,
+            "workflow_run_attempt": 1,
+            "producer_workflow_ref": IMAGE_WORKFLOW_REF,
+        }
+        wrapper = f"name: Build\njobs:\n  image:\n    uses: {IMAGE_WORKFLOW_REF}\n"
+        validate_source_image_run(SourceApi(wrapper), "celoria/service", source, IMAGE_WORKFLOW_REF)
+        with self.assertRaisesRegex(GateError, "only call the pinned reusable image workflow"):
+            validate_source_image_run(
+                SourceApi(wrapper + "    steps:\n      - run: echo unsafe\n"),
+                "celoria/service",
+                source,
+                IMAGE_WORKFLOW_REF,
             )
+
+    def test_terraform_is_explicitly_disabled_without_private_artifact_provenance(self):
+        with self.assertRaisesRegex(GateError, "GitHub Team plans cannot attest private-repository artifacts"):
+            validate_supported_kind("terraform")
 
 
 if __name__ == "__main__":
