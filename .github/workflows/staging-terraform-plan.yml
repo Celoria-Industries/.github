@@ -1,0 +1,352 @@
+name: Staging Terraform plan producer
+
+on:
+  workflow_call:
+    inputs:
+      source-pr-number:
+        description: Merged, human-reviewed infrastructure PR to plan
+        required: true
+        type: number
+    outputs:
+      plan-artifact-id:
+        description: Immutable saved-plan artifact ID
+        value: ${{ jobs.plan.outputs.plan_artifact_id }}
+      plan-artifact-digest:
+        description: GitHub SHA-256 digest of the saved-plan artifact
+        value: ${{ jobs.plan.outputs.plan_artifact_digest }}
+      evidence-artifact-id:
+        description: Immutable signed-evidence artifact ID
+        value: ${{ jobs.sign.outputs.evidence_artifact_id }}
+      evidence-artifact-digest:
+        description: GitHub SHA-256 digest of the signed-evidence artifact
+        value: ${{ jobs.sign.outputs.evidence_artifact_digest }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate-source:
+    name: Validate reviewed source PR
+    runs-on: ubuntu-latest
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      source_pr_number: ${{ steps.gate.outputs.source-pr-number }}
+      source_pr_head_sha: ${{ steps.gate.outputs.source-pull-request-head-sha }}
+      source_pr_merge_sha: ${{ steps.gate.outputs.source-pull-request-merge-sha }}
+      source_commit: ${{ steps.gate.outputs.source-commit }}
+    steps:
+      - name: Validate merged source PR and current human approval
+        id: gate
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@58a4ab32b02046ce565f4426c5791a5b43f672ce
+        with:
+          verification-mode: source-pr
+          source-pr-number: ${{ inputs.source-pr-number }}
+
+  plan:
+    name: Create read-only staging saved plan
+    needs: validate-source
+    runs-on: ubuntu-latest
+    environment: staging-plan
+    permissions:
+      checks: read
+      contents: read
+      id-token: write
+      pull-requests: read
+    outputs:
+      plan_artifact_id: ${{ steps.upload-plan.outputs.artifact-id }}
+      plan_artifact_digest: ${{ steps.upload-plan.outputs.artifact-digest }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+      STATE_ROLE_ARN: ${{ vars.AWS_ROLE_ARN_STAGING_PLAN }}
+      DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN_STAGING_PLAN }}
+      STATE_BUCKET: ${{ vars.TF_STATE_BUCKET_STAGING }}
+      TARGET_ACCOUNT_ID: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+      TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+      TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+    steps:
+      - name: Validate fixed staging plan configuration
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          role_re='^arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9+=,.@_/-]+$'
+          [[ "$STATE_ROLE_ARN" =~ $role_re ]] || { echo "::error::Configure AWS_ROLE_ARN_STAGING_PLAN"; exit 1; }
+          state_account="${BASH_REMATCH[1]}"
+          [[ "$DEPLOY_ROLE_ARN" =~ $role_re ]] || { echo "::error::Configure AWS_DEPLOY_ROLE_ARN_STAGING_PLAN"; exit 1; }
+          [[ "${BASH_REMATCH[1]}" == "$TARGET_ACCOUNT_ID" ]] || { echo "::error::Staging deploy-plan role account does not match STAGING_PLAN_TARGET_ACCOUNT_ID"; exit 1; }
+          [[ "$state_account" != "$TARGET_ACCOUNT_ID" ]] || { echo "::error::Bootstrap state-plan role and staging deploy account must be distinct"; exit 1; }
+          [[ "$STATE_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { echo "::error::Configure TF_STATE_BUCKET_STAGING"; exit 1; }
+          [[ "$TARGET_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || { echo "::error::Configure STAGING_PLAN_TARGET_ACCOUNT_ID"; exit 1; }
+          [[ "$TARGET_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Configure STAGING_PLAN_TARGET_REGION"; exit 1; }
+          [[ "$TERRAFORM_ROOT" =~ ^stacks/[a-z0-9][a-z0-9-]*/staging/[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*$ ]] || { echo "::error::Configure STAGING_PLAN_ROOT to one staging stack"; exit 1; }
+          [[ "$GITHUB_EVENT_NAME" == "workflow_call" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]] || { echo "::error::Unsupported plan event"; exit 1; }
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "::error::Plan producer caller must be dispatched from main"; exit 1; }
+          printf 'state_account=%s\n' "$state_account" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the exact merged source PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.validate-source.outputs.source_commit }}
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: 1.10.5
+
+      - name: Assume the existing staging state-plan role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_STAGING_PLAN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: StagingStatePlan-${{ github.run_id }}
+
+      - name: Configure the existing member-account deploy-plan profile
+        env:
+          DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN_STAGING_PLAN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          config="$RUNNER_TEMP/aws-deploy-config"
+          actor="$(printf '%s' "$GITHUB_ACTOR" | tr -c 'A-Za-z0-9+=,.@-' '-' | cut -c1-40)"
+          {
+            echo "[profile deploy]"
+            echo "role_arn = $DEPLOY_ROLE_ARN"
+            echo "credential_source = Environment"
+            echo "role_session_name = tf-plan-${actor}-${GITHUB_RUN_ID}"
+          } > "$config"
+          echo "AWS_CONFIG_FILE=$config" >> "$GITHUB_ENV"
+
+      - name: Verify state and staging member account identities
+        env:
+          EXPECTED_STATE_ACCOUNT: ${{ steps.validate.outputs.state_account }}
+          TARGET_ACCOUNT_ID: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_account="$(aws sts get-caller-identity --query Account --output text)"
+          [[ "$state_account" == "$EXPECTED_STATE_ACCOUNT" ]] || { echo "::error::State-plan role resolved to the wrong bootstrap account"; exit 1; }
+          deploy_account="$(aws sts get-caller-identity --profile deploy --region "$TARGET_REGION" --query Account --output text)"
+          [[ "$deploy_account" == "$TARGET_ACCOUNT_ID" ]] || { echo "::error::Deploy-plan profile resolved to the wrong staging account"; exit 1; }
+
+      - name: Initialize and create the staging saved plan
+        env:
+          TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform -chdir="$TERRAFORM_ROOT" init -input=false \
+            -backend-config="bucket=$STATE_BUCKET" \
+            -backend-config="key=$TERRAFORM_ROOT/terraform.tfstate" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="use_lockfile=true"
+          terraform -chdir="$TERRAFORM_ROOT" plan -input=false -no-color \
+            -lock-timeout=5m -var="region=$TARGET_REGION" -out=tfplan
+          terraform -chdir="$TERRAFORM_ROOT" show -json tfplan \
+            | jq -r '[.resource_changes[]?.change.actions[]?] | group_by(.) | map({(.[0]): length}) | add // {}' \
+            > "$RUNNER_TEMP/staging-plan-summary.json"
+          printf '### Staging Terraform plan\n\nRoot: `%s`\n\nTarget: `%s` / `%s`\n\nActions: `%s`\n' \
+            "$TERRAFORM_ROOT" "$TARGET_ACCOUNT_ID" "$TARGET_REGION" \
+            "$(cat "$RUNNER_TEMP/staging-plan-summary.json")" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$RUNNER_TEMP/staging-terraform-plan"
+          cp "$TERRAFORM_ROOT/tfplan" "$RUNNER_TEMP/staging-terraform-plan/tfplan"
+
+      - name: Upload immutable saved plan
+        id: upload-plan
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: staging-terraform-plan
+          path: ${{ runner.temp }}/staging-terraform-plan/tfplan
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: false
+
+  sign:
+    name: Sign canonical plan evidence
+    needs: [validate-source, plan]
+    runs-on: ubuntu-latest
+    environment: staging-plan-signing
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      id-token: write
+      pull-requests: read
+    outputs:
+      evidence_artifact_id: ${{ steps.upload-evidence.outputs.artifact-id }}
+      evidence_artifact_digest: ${{ steps.upload-evidence.outputs.artifact-digest }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+      SIGNER_ROLE_ARN: ${{ vars.AWS_ROLE_ARN_STAGING_SIGNER }}
+      SIGNING_KEY_ARN: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+      TARGET_ACCOUNT_ID: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+      TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+      TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
+      TRUSTED_PLAN_WORKFLOW: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
+      PUBLIC_KEY_DER_B64: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}
+    steps:
+      - name: Download the exact saved-plan artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.plan.outputs.plan_artifact_id }}
+          path: ${{ runner.temp }}/staging-plan-artifacts
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+
+      - name: Validate provenance and prepare canonical record
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@58a4ab32b02046ce565f4426c5791a5b43f672ce
+        with:
+          operation: prepare-plan-evidence
+          source-pr-number: ${{ inputs.source-pr-number }}
+          source-pull-request-head-sha: ${{ needs.validate-source.outputs.source_pr_head_sha }}
+          source-pull-request-merge-sha: ${{ needs.validate-source.outputs.source_pr_merge_sha }}
+          plan-artifact-id: ${{ needs.plan.outputs.plan_artifact_id }}
+          plan-artifact-digest: ${{ needs.plan.outputs.plan_artifact_digest }}
+          plan-artifact-path: ${{ runner.temp }}/staging-plan-artifacts/staging-terraform-plan/tfplan
+          evidence-output-directory: ${{ runner.temp }}/staging-plan-evidence
+          trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
+          plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          plan-root: ${{ vars.STAGING_PLAN_ROOT }}
+          plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+
+      - name: Validate isolated KMS signer identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          role_re='^arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9+=,.@_/-]+$'
+          key_re='^arn:aws:kms:[a-z0-9-]+:([0-9]{12}):key/[0-9a-f-]{36}$'
+          [[ "$SIGNER_ROLE_ARN" =~ $role_re ]] || { echo "::error::Configure AWS_ROLE_ARN_STAGING_SIGNER"; exit 1; }
+          signer_account="${BASH_REMATCH[1]}"
+          [[ "$SIGNING_KEY_ARN" =~ $key_re ]] || { echo "::error::Configure STAGING_PLAN_SIGNING_KEY_ARN with an immutable key ARN"; exit 1; }
+          [[ "${BASH_REMATCH[1]}" == "$signer_account" ]] || { echo "::error::KMS signer and signing key must be in the same bootstrap account"; exit 1; }
+          [[ "$PUBLIC_KEY_DER_B64" =~ ^[A-Za-z0-9+/]+=*$ ]] || { echo "::error::Configure STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64"; exit 1; }
+
+      - name: Assume the KMS-only staging plan signer role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_STAGING_SIGNER }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: StagingPlanSign-${{ github.run_id }}
+
+      - name: Sign the canonical evidence digest with KMS
+        env:
+          SIGNING_KEY_ARN: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          SIGNER_ROLE_ARN: ${{ vars.AWS_ROLE_ARN_STAGING_SIGNER }}
+          EVIDENCE_DIRECTORY: ${{ runner.temp }}/staging-plan-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          role_account="$(sed -E 's#^arn:aws:iam::([0-9]{12}):role/.*#\1#' <<< "$SIGNER_ROLE_ARN")"
+          key_account="$(sed -E 's#^arn:aws:kms:[^:]+:([0-9]{12}):key/.*#\1#' <<< "$SIGNING_KEY_ARN")"
+          actual_account="$(aws sts get-caller-identity --query Account --output text)"
+          [[ "$role_account" =~ ^[0-9]{12}$ && "$actual_account" == "$role_account" && "$key_account" == "$role_account" ]] || { echo "::error::KMS signer identity does not match the signing key account"; exit 1; }
+          openssl dgst -sha256 -binary "$EVIDENCE_DIRECTORY/evidence.json" > "$RUNNER_TEMP/evidence-digest.bin"
+          result="$(aws kms sign \
+            --key-id "$SIGNING_KEY_ARN" \
+            --message "fileb://$RUNNER_TEMP/evidence-digest.bin" \
+            --message-type DIGEST \
+            --signing-algorithm RSASSA_PSS_SHA_256 \
+            --output json)"
+          [[ "$(jq -er '.KeyId' <<<"$result")" == "$SIGNING_KEY_ARN" ]] || { echo "::error::KMS signed with an unexpected key"; exit 1; }
+          jq -er '.Signature' <<<"$result" > "$EVIDENCE_DIRECTORY/signature.b64"
+          printf '%s' "$PUBLIC_KEY_DER_B64" | base64 --decode > "$RUNNER_TEMP/staging-plan-public-key.der"
+          openssl pkey -pubin -inform DER -in "$RUNNER_TEMP/staging-plan-public-key.der" -text -noout \
+            | grep -Fq 'Public-Key: (3072 bit)' || { echo "::error::Pinned signing key is not RSA-3072"; exit 1; }
+          openssl pkey -pubin -inform DER -in "$RUNNER_TEMP/staging-plan-public-key.der" \
+            -out "$RUNNER_TEMP/staging-plan-public-key.pem"
+          base64 --decode "$EVIDENCE_DIRECTORY/signature.b64" > "$RUNNER_TEMP/staging-plan-signature.bin"
+          openssl dgst -sha256 -verify "$RUNNER_TEMP/staging-plan-public-key.pem" \
+            -signature "$RUNNER_TEMP/staging-plan-signature.bin" \
+            -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:-1 \
+            "$EVIDENCE_DIRECTORY/evidence.json"
+
+      - name: Upload immutable signed evidence
+        id: upload-evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: staging-terraform-evidence
+          path: ${{ runner.temp }}/staging-plan-evidence
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: false
+
+      - name: Publish promotion-manifest source fields
+        env:
+          PLAN_ARTIFACT_ID: ${{ needs.plan.outputs.plan_artifact_id }}
+          PLAN_ARTIFACT_DIGEST: ${{ needs.plan.outputs.plan_artifact_digest }}
+          EVIDENCE_ARTIFACT_ID: ${{ steps.upload-evidence.outputs.artifact-id }}
+          EVIDENCE_ARTIFACT_DIGEST: ${{ steps.upload-evidence.outputs.artifact-digest }}
+          SOURCE_PR_NUMBER: ${{ needs.validate-source.outputs.source_pr_number }}
+          SOURCE_PR_HEAD_SHA: ${{ needs.validate-source.outputs.source_pr_head_sha }}
+          SOURCE_PR_MERGE_SHA: ${{ needs.validate-source.outputs.source_pr_merge_sha }}
+          TARGET_ACCOUNT_ID: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          TERRAFORM_ROOT: ${{ vars.STAGING_PLAN_ROOT }}
+          SIGNING_KEY_ARN: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          TRUSTED_PLAN_WORKFLOW: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$SOURCE_PR_MERGE_SHA" \
+            --arg head "$SOURCE_PR_HEAD_SHA" \
+            --arg merge "$SOURCE_PR_MERGE_SHA" \
+            --arg workflow_head "$GITHUB_SHA" \
+            --arg workflow "$TRUSTED_PLAN_WORKFLOW" \
+            --arg plan_digest "$PLAN_ARTIFACT_DIGEST" \
+            --arg plan_sha "$(sha256sum "$RUNNER_TEMP/staging-plan-artifacts/staging-terraform-plan/tfplan" | cut -d' ' -f1)" \
+            --arg evidence_digest "$EVIDENCE_ARTIFACT_DIGEST" \
+            --arg account "$TARGET_ACCOUNT_ID" \
+            --arg region "$TARGET_REGION" \
+            --arg root "$TERRAFORM_ROOT" \
+            --arg key "$SIGNING_KEY_ARN" \
+            --argjson source_pr "$SOURCE_PR_NUMBER" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson plan_id "$PLAN_ARTIFACT_ID" \
+            --argjson evidence_id "$EVIDENCE_ARTIFACT_ID" \
+            '{
+              schema_version: 1,
+              target: "staging",
+              kind: "terraform",
+              source: {
+                repository: $repository,
+                commit: $commit,
+                pull_request_number: $source_pr,
+                pull_request_head_sha: $head,
+                pull_request_merge_sha: $merge,
+                workflow_run_id: $run_id,
+                workflow_run_attempt: $run_attempt,
+                workflow_run_head_sha: $workflow_head,
+                producer_workflow_ref: $workflow,
+                plan_artifact_id: $plan_id,
+                plan_artifact_name: "staging-terraform-plan",
+                plan_artifact_digest: $plan_digest,
+                plan_sha256: ("sha256:" + $plan_sha),
+                evidence_artifact_id: $evidence_id,
+                evidence_artifact_name: "staging-terraform-evidence",
+                evidence_artifact_digest: $evidence_digest,
+                target_account_id: $account,
+                target_region: $region,
+                terraform_root: $root,
+                signing_key_arn: $key,
+                signing_algorithm: "RSASSA_PSS_SHA_256"
+              }
+            }' > "$RUNNER_TEMP/staging-promotion-manifest.json"
+          {
+            printf '### Approved promotion manifest source\n\n'
+            printf 'Create a separate reviewed PR changing only `.github/staging-promotion.json` to this object:\n\n'
+            printf '```json\n%s\n```\n' "$(cat "$RUNNER_TEMP/staging-promotion-manifest.json")"
+          } >> "$GITHUB_STEP_SUMMARY"
