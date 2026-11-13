@@ -270,6 +270,7 @@ def repository_file(api, repository, path, ref):
 
 
 def validate_source_image_run(api, repository, source, trusted_workflow):
+    validate_reviewed_source_commit(api, repository, source["commit"])
     run = api.get(
         f'/repos/{repository}/actions/runs/{source["workflow_run_id"]}'
         f'/attempts/{source["workflow_run_attempt"]}'
@@ -293,6 +294,25 @@ def validate_source_image_run(api, repository, source, trusted_workflow):
     has_run_step = re.search(r"(?m)^[ \t]*(?:-\s*)?run\s*:", wrapper) is not None
     require(uses == [trusted_workflow] and not has_run_step,
             "Source workflow must only call the pinned reusable image workflow, with no run steps")
+
+
+def validate_reviewed_source_commit(api, repository, source_commit):
+    validate_full_sha(source_commit, "Image source commit")
+    pull_requests = api.list(f"/repos/{repository}/commits/{source_commit}/pulls")
+    matches = [
+        pr for pr in pull_requests
+        if pr.get("merge_commit_sha") == source_commit
+        and pr.get("merged_at")
+        and (pr.get("base") or {}).get("ref") == "main"
+        and (pr.get("base") or {}).get("repo", {}).get("full_name") == repository
+        and (pr.get("head") or {}).get("repo", {}).get("full_name") == repository
+    ]
+    require(len(matches) == 1,
+            "Image source commit must belong to exactly one merged PR targeting main")
+    pr, _ = validate_reviewed_pr(api, repository, matches[0].get("number"))
+    require(pr.get("merge_commit_sha") == source_commit,
+            "Image source PR merge commit does not match the producer commit")
+    return pr
 
 
 def validate_terraform_manifest(manifest, repository, trusted_workflow, expected):
@@ -396,7 +416,10 @@ def list_run_artifacts(api, repository, run_id):
         page_artifacts = response.get("artifacts", [])
         require(isinstance(page_artifacts, list), "Terraform artifact list response was invalid")
         artifacts.extend(page_artifacts)
-        if len(artifacts) >= response.get("total_count", 0):
+        total_count = response.get("total_count")
+        require(type(total_count) is int and total_count >= len(artifacts),
+                "Terraform artifact list omitted a valid total_count")
+        if len(artifacts) >= total_count:
             return artifacts
     fail("Terraform producer run has too many artifacts to verify safely")
 

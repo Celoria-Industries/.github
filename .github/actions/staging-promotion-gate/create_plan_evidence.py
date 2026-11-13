@@ -18,6 +18,7 @@ from verify_promotion import (
 WORKFLOW_PATH = ".github/workflows/staging-terraform-plan.yml"
 PLAN_REPOSITORY = "Celoria-Industries/infrastructure-as-code"
 PLAN_ARTIFACT_NAME = "staging-terraform-plan"
+EVIDENCE_ARTIFACT_NAME = "staging-terraform-evidence"
 PLAN_ROOT_PATTERN = re.compile(
     r"stacks/[a-z0-9][a-z0-9-]*/staging/[a-z0-9][a-z0-9-]*(?:/[a-z0-9][a-z0-9-]*)*"
 )
@@ -87,6 +88,10 @@ def main():
     require(
         len([item for item in run_artifacts if item.get("name") == PLAN_ARTIFACT_NAME]) == 1,
         "Current producer run must contain exactly one Terraform plan artifact",
+    )
+    require(
+        not any(item.get("name") == EVIDENCE_ARTIFACT_NAME for item in run_artifacts),
+        "Current producer run already contains signed Terraform evidence",
     )
     artifact = api.get(f"/repos/{repository}/actions/artifacts/{artifact_id}")
     require(artifact.get("id") == artifact_id, "Plan artifact ID does not match the GitHub artifact")

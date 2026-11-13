@@ -6,6 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".github/actions/staging-promotion-gate"))
+STAGING_WORKFLOW = (ROOT / ".github/workflows/staging-promotion-gate.yml").read_text()
 
 from verify_promotion import (  # noqa: E402
     GateError,
@@ -77,6 +78,11 @@ class FakeApi:
 
 
 class StagingPromotionGateTest(unittest.TestCase):
+    def test_image_copy_transfers_all_platforms_and_preserves_digest(self):
+        self.assertIn("podman pull --all --authfile", STAGING_WORKFLOW)
+        self.assertIn("podman push --all --authfile", STAGING_WORKFLOW)
+        self.assertIn('[[ "$promoted_digest" == "$EXPECTED_DIGEST" ]]', STAGING_WORKFLOW)
+        self.assertNotIn("ecr put-image", STAGING_WORKFLOW)
     def test_promotion_must_be_invoked_from_main(self):
         validate_promotion_trigger("workflow_dispatch", "refs/heads/main")
         for event, ref in (
@@ -215,14 +221,25 @@ class StagingPromotionGateTest(unittest.TestCase):
             "run_attempt": 1,
             "path": ".github/workflows/image.yml@refs/heads/main",
         }
+        source_pr = pr()
+        source_pr.update({"number": 17, "merge_commit_sha": SOURCE_SHA})
 
         class SourceApi:
-            def __init__(self, wrapper):
+            def __init__(self, wrapper, pull_requests=None, reviews=None):
                 self.wrapper = wrapper
+                self.source_prs = pull_requests if pull_requests is not None else [source_pr]
+                self.reviews = reviews if reviews is not None else [approval()]
 
             def get(self, path):
                 if path == "/repos/celoria/service/actions/runs/123/attempts/1":
                     return run
+                if path == "/repos/celoria/service/pulls/17":
+                    return source_pr
+                if "/check-runs?filter=latest&per_page=100&page=" in path:
+                    return {
+                        "check_runs": [{"status": "completed", "conclusion": "success"}],
+                        "total_count": 1,
+                    }
                 if path == f"/repos/celoria/service/contents/.github/workflows/image.yml?ref={SOURCE_SHA}":
                     import base64
                     return {
@@ -230,6 +247,13 @@ class StagingPromotionGateTest(unittest.TestCase):
                         "content": base64.b64encode(self.wrapper.encode()).decode(),
                     }
                 raise AssertionError(f"Unexpected API request: {path}")
+
+            def list(self, path):
+                if path == f"/repos/celoria/service/commits/{SOURCE_SHA}/pulls":
+                    return self.source_prs
+                if path == "/repos/celoria/service/pulls/17/reviews":
+                    return self.reviews
+                raise AssertionError(f"Unexpected API list request: {path}")
 
         source = {
             "commit": SOURCE_SHA,
@@ -242,6 +266,20 @@ class StagingPromotionGateTest(unittest.TestCase):
         with self.assertRaisesRegex(GateError, "only call the pinned reusable image workflow"):
             validate_source_image_run(
                 SourceApi(wrapper + "    steps:\n      - run: echo unsafe\n"),
+                "celoria/service",
+                source,
+                IMAGE_WORKFLOW_REF,
+            )
+        with self.assertRaisesRegex(GateError, "exactly one merged PR"):
+            validate_source_image_run(
+                SourceApi(wrapper, pull_requests=[]),
+                "celoria/service",
+                source,
+                IMAGE_WORKFLOW_REF,
+            )
+        with self.assertRaisesRegex(GateError, "current human approval"):
+            validate_source_image_run(
+                SourceApi(wrapper, reviews=[]),
                 "celoria/service",
                 source,
                 IMAGE_WORKFLOW_REF,
