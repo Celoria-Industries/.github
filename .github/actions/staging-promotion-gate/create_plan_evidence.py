@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import sys
 
 from plan_evidence import EvidenceError, canonical_record

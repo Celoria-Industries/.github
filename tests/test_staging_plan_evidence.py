@@ -1,11 +1,14 @@
 import base64
 import hashlib
 import json
+import os
+import runpy
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +21,7 @@ from plan_evidence import (  # noqa: E402
     verify_plan_bytes,
     verify_plan_evidence,
 )
+from verify_promotion import GitHubApi  # noqa: E402
 
 
 WORKFLOW_SHA = "1" * 40
@@ -54,6 +58,98 @@ def evidence_record():
         "signing_key_arn": "arn:aws:kms:us-east-2:123456789012:key/12345678-1234-1234-1234-123456789012",
         "signing_algorithm": "RSASSA_PSS_SHA_256",
     }
+
+
+class CreatePlanEvidenceTest(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        directory = Path(self.tempdir.name)
+        plan = directory / "tfplan"
+        plan.write_bytes(b"synthetic plan fixture; no Terraform or state")
+        self.output = directory / "evidence"
+        self.record = evidence_record()
+        self.record["plan_sha256"] = "sha256:" + hashlib.sha256(plan.read_bytes()).hexdigest()
+        record = self.record
+        repository = record["source_repository"]
+        head = record["source_pull_request_head_sha"]
+        root = record["terraform_root"]
+        prefix = f"/repos/{repository}"
+        self.artifact = {
+            "id": 102, "name": "staging-terraform-plan", "digest": PLAN_DIGEST,
+            "expired": False, "workflow_run": {"id": 101},
+        }
+        self.responses = {
+            f"{prefix}/pulls/91": {
+                "state": "closed", "merged_at": "2026-11-13T10:00:00Z",
+                "base": {"ref": "main", "repo": {"full_name": repository}},
+                "head": {"sha": head, "repo": {"full_name": repository}},
+                "user": {"login": "author", "type": "User"},
+                "merge_commit_sha": MERGE_SHA,
+                "labels": [{"name": "staging-plan:foundation"}],
+            },
+            f"{prefix}/pulls/91/reviews?per_page=100&page=1": [{
+                "state": "APPROVED", "commit_id": head,
+                "submitted_at": "2026-11-13T09:00:00Z",
+                "user": {"login": "reviewer", "type": "User"},
+            }],
+            f"{prefix}/commits/{head}/check-runs?filter=latest&per_page=100&page=1": {
+                "total_count": 1, "check_runs": [{
+                    "name": f"Plan {root} / Plan {root}",
+                    "status": "completed", "conclusion": "success",
+                }],
+            },
+            f"{prefix}/actions/runs/101/attempts/1": {
+                "status": "in_progress", "event": "workflow_dispatch", "head_branch": "main",
+                "head_sha": RUN_HEAD_SHA, "run_attempt": 1,
+                "path": ".github/workflows/staging-terraform-plan.yml",
+            },
+            f"{prefix}/compare/{MERGE_SHA}...{RUN_HEAD_SHA}": {"status": "ahead"},
+            f"{prefix}/contents/.github/workflows/staging-terraform-plan.yml?ref={RUN_HEAD_SHA}": {
+                "encoding": "base64",
+                "content": base64.b64encode(
+                    f"jobs:\n  plan:\n    uses: {record['producer_workflow_ref']}\n".encode()
+                ).decode(),
+            },
+            f"{prefix}/actions/runs/101/artifacts?per_page=100&page=1": {
+                "total_count": 1, "artifacts": [self.artifact],
+            },
+            f"{prefix}/actions/artifacts/102": self.artifact,
+        }
+        self.environment = {
+            "GH_TOKEN": "synthetic-test-token",
+            "GITHUB_REPOSITORY": repository,
+            "SOURCE_PR_NUMBER": "91", "STAGING_PLAN_LAYER": "foundation",
+            "SOURCE_PR_HEAD_SHA": head, "SOURCE_PR_MERGE_SHA": MERGE_SHA,
+            "GITHUB_RUN_ID": "101", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": RUN_HEAD_SHA,
+            "STAGING_TRUSTED_PLAN_WORKFLOW": record["producer_workflow_ref"],
+            "PLAN_ARTIFACT_ID": "102", "PLAN_ARTIFACT_DIGEST": PLAN_DIGEST,
+            "PLAN_ARTIFACT_PATH": str(plan),
+            "STAGING_PLAN_TARGET_ACCOUNT_ID": record["target_account_id"],
+            "STAGING_PLAN_TARGET_REGION": record["target_region"],
+            "STAGING_PLAN_SIGNING_KEY_ARN": record["signing_key_arn"],
+            "EVIDENCE_OUTPUT_DIRECTORY": str(self.output),
+        }
+
+    def run_entrypoint(self):
+        with patch.dict(os.environ, self.environment, clear=True), \
+                patch.object(GitHubApi, "get", side_effect=self.responses.__getitem__):
+            runpy.run_path(
+                str(ROOT / ".github/actions/staging-promotion-gate/create_plan_evidence.py"),
+                run_name="__main__",
+            )
+
+    def test_entrypoint_emits_exact_canonical_evidence(self):
+        self.run_entrypoint()
+        self.assertEqual((self.output / "evidence.json").read_bytes(), canonical_record(self.record))
+        self.assertEqual(strict_record((self.output / "evidence.json").read_bytes()), self.record)
+
+    def test_entrypoint_rejects_artifact_digest_substitution_before_output(self):
+        self.artifact["digest"] = "sha256:" + "9" * 64
+        with self.assertRaises(SystemExit) as result:
+            self.run_entrypoint()
+        self.assertEqual(result.exception.code, 1)
+        self.assertFalse(self.output.exists())
 
 
 class StagingPlanEvidenceTest(unittest.TestCase):
