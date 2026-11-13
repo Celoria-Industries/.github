@@ -117,13 +117,19 @@ class ContainerWorkflowTest(unittest.TestCase):
     def test_push_outputs_the_ecr_digest(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
-            for name in ("podman", "aws"):
-                executable = path / name
-                if name == "podman":
-                    executable.write_text("#!/bin/bash\nexit 0\n")
-                else:
-                    executable.write_text("#!/bin/bash\nprintf '%s\\n' \"$EXPECTED_DIGEST\"\n")
-                executable.chmod(0o755)
+            executable = path / "podman"
+            executable.write_text(
+                "#!/bin/bash\n"
+                "while [[ $# -gt 0 ]]; do\n"
+                "  if [[ \"$1\" == \"--digestfile\" ]]; then\n"
+                "    printf '%s' \"$EXPECTED_DIGEST\" > \"$2\"\n"
+                "    shift 2\n"
+                "  else\n"
+                "    shift\n"
+                "  fi\n"
+                "done\n"
+            )
+            executable.chmod(0o755)
             digest = "sha256:" + "a" * 64
             output = path / "output"
             summary = path / "summary"
@@ -134,6 +140,7 @@ class ContainerWorkflowTest(unittest.TestCase):
                 "IMAGE_COMMIT": "b" * 40,
                 "ECR_REGISTRY": "123456789012.dkr.ecr.us-east-2.amazonaws.com",
                 "EXPECTED_DIGEST": digest,
+                "RUNNER_TEMP": directory,
                 "GITHUB_OUTPUT": str(output),
                 "GITHUB_STEP_SUMMARY": str(summary),
             })

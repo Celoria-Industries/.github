@@ -12,7 +12,6 @@ from plan_evidence import EvidenceError, strict_record, verify_plan_bytes, verif
 
 
 MANIFEST_PATH = ".github/staging-promotion.json"
-IMAGE_WORKFLOW_PATH = ".github/workflows/container-image.yml"
 PLAN_WORKFLOW_PATH = ".github/workflows/staging-terraform-plan.yml"
 PLAN_ARTIFACT_NAME = "staging-terraform-plan"
 EVIDENCE_ARTIFACT_NAME = "staging-terraform-evidence"
@@ -281,11 +280,15 @@ def validate_source_image_run(api, repository, source, trusted_workflow):
             "Source image workflow must be a push to main")
     require(run.get("head_sha") == source["commit"], "Source image workflow commit does not match the manifest")
     require(run.get("run_attempt") == source["workflow_run_attempt"], "Source image run attempt does not match")
-    require(run.get("path", "").split("@", 1)[0] == IMAGE_WORKFLOW_PATH,
-            "Source image run used an unexpected workflow")
+    caller_workflow_path = run.get("path", "").split("@", 1)[0]
+    require(
+        re.fullmatch(r"\.github/workflows/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.ya?ml", caller_workflow_path)
+        is not None,
+        "Source image run has an invalid caller workflow path",
+    )
     require(source["producer_workflow_ref"] == trusted_workflow,
             "Image producer does not match the admin-configured immutable workflow")
-    wrapper = repository_file(api, repository, IMAGE_WORKFLOW_PATH, source["commit"])
+    wrapper = repository_file(api, repository, caller_workflow_path, source["commit"])
     uses = re.findall(r"(?m)^\s+uses:\s*([^\s#]+)\s*(?:#.*)?$", wrapper)
     has_run_step = re.search(r"(?m)^[ \t]*(?:-\s*)?run\s*:", wrapper) is not None
     require(uses == [trusted_workflow] and not has_run_step,
@@ -545,6 +548,8 @@ def main():
             os.environ.get("GITHUB_REF", ""),
         )
         repository = validate_repo(os.environ.get("GITHUB_REPOSITORY"), "GITHUB_REPOSITORY")
+        require(repository == PLAN_REPOSITORY,
+                f"Terraform plan producer is restricted to {PLAN_REPOSITORY}")
         pr_number = parse_positive_int(os.environ.get("SOURCE_PR_NUMBER"), "source-pr-number")
         api = GitHubApi()
         source_pr, head_sha = validate_reviewed_pr(api, repository, pr_number)

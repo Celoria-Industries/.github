@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / ".github/actions/staging-promotion-gate"))
 from plan_evidence import (  # noqa: E402
     EvidenceError,
     canonical_record,
+    strict_record,
     verify_plan_bytes,
     verify_plan_evidence,
 )
@@ -146,6 +147,34 @@ class StagingPlanEvidenceTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(EvidenceError, "unsupported signature algorithm"):
             verify_plan_evidence(self.record, self.signature_b64, "ECDSA_SHA_256", self.public_key_b64, {})
+
+    def test_requires_rsa_3072_pinned_public_key(self):
+        private_key = self.directory / "rsa-2048.pem"
+        public_der = self.directory / "rsa-2048.der"
+        subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
+             "-out", str(private_key)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["openssl", "pkey", "-in", str(private_key), "-pubout", "-outform", "DER",
+             "-out", str(public_der)],
+            check=True,
+            capture_output=True,
+        )
+        with self.assertRaisesRegex(EvidenceError, "RSA-3072"):
+            verify_plan_evidence(
+                self.record,
+                self.signature_b64,
+                "RSASSA_PSS_SHA_256",
+                base64.b64encode(public_der.read_bytes()).decode(),
+                {},
+            )
+
+    def test_rejects_duplicate_record_keys(self):
+        with self.assertRaisesRegex(EvidenceError, "duplicate JSON keys"):
+            strict_record(b'{"target":"staging","target":"production"}')
 
     def test_rejects_changed_target_and_stale_producer(self):
         with self.assertRaisesRegex(EvidenceError, "does not match target"):

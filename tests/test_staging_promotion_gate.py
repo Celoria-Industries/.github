@@ -13,6 +13,7 @@ from verify_promotion import (  # noqa: E402
     validate_promotion_trigger,
     validate_reviewed_pr,
     validate_source_image_run,
+    validate_terraform_artifact,
     validate_terraform_manifest,
     validate_supported_kind,
 )
@@ -212,7 +213,7 @@ class StagingPromotionGateTest(unittest.TestCase):
             "head_branch": "main",
             "head_sha": SOURCE_SHA,
             "run_attempt": 1,
-            "path": ".github/workflows/container-image.yml",
+            "path": ".github/workflows/image.yml@refs/heads/main",
         }
 
         class SourceApi:
@@ -222,7 +223,7 @@ class StagingPromotionGateTest(unittest.TestCase):
             def get(self, path):
                 if path == "/repos/celoria/service/actions/runs/123/attempts/1":
                     return run
-                if path == f"/repos/celoria/service/contents/.github/workflows/container-image.yml?ref={SOURCE_SHA}":
+                if path == f"/repos/celoria/service/contents/.github/workflows/image.yml?ref={SOURCE_SHA}":
                     import base64
                     return {
                         "encoding": "base64",
@@ -297,6 +298,45 @@ class StagingPromotionGateTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(GateError, "must be image or terraform"):
             validate_supported_kind("shell")
+
+    def test_terraform_artifact_requires_unique_id_digest_and_run_binding(self):
+        digest = "sha256:" + "1" * 64
+        artifact = {
+            "id": 102,
+            "name": "staging-terraform-plan",
+            "digest": digest,
+            "expired": False,
+            "workflow_run": {"id": 101},
+        }
+
+        class ArtifactApi:
+            def __init__(self, artifacts):
+                self.artifacts = artifacts
+
+            def get(self, path):
+                if path == "/repos/Celoria-Industries/infrastructure-as-code/actions/runs/101/artifacts?per_page=100&page=1":
+                    return {"artifacts": self.artifacts, "total_count": len(self.artifacts)}
+                if path.endswith("/actions/artifacts/102"):
+                    return artifact
+                raise AssertionError(f"Unexpected API request: {path}")
+
+        validate_terraform_artifact(
+            ArtifactApi([artifact]),
+            "Celoria-Industries/infrastructure-as-code",
+            102,
+            "staging-terraform-plan",
+            digest,
+            101,
+        )
+        with self.assertRaisesRegex(GateError, "exactly one"):
+            validate_terraform_artifact(
+                ArtifactApi([artifact, dict(artifact, id=104)]),
+                "Celoria-Industries/infrastructure-as-code",
+                102,
+                "staging-terraform-plan",
+                digest,
+                101,
+            )
 
 
 if __name__ == "__main__":

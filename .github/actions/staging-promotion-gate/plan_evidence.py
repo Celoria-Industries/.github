@@ -133,6 +133,17 @@ def verify_plan_evidence(record, signature_b64, signing_algorithm, public_key_de
         with open(public_key_der_path, "wb") as target:
             target.write(public_key_der)
 
+        key_details = subprocess.run(
+            ["openssl", "pkey", "-pubin", "-inform", "DER", "-in", public_key_der_path,
+             "-text", "-noout"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            key_details.returncode == 0 and "Public-Key: (3072 bit)" in key_details.stdout,
+            "Pinned KMS public key must be an RSA-3072 public key",
+        )
         convert = subprocess.run(
             [
                 "openssl", "pkey", "-pubin", "-inform", "DER", "-in", public_key_der_path,
