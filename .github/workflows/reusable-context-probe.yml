@@ -1,0 +1,29 @@
+name: Reusable workflow caller-context probe
+
+on:
+  workflow_call:
+    outputs:
+      caller-event-name:
+        value: ${{ jobs.probe.outputs.event_name }}
+      caller-ref:
+        value: ${{ jobs.probe.outputs.ref }}
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      event_name: ${{ steps.context.outputs.event_name }}
+      ref: ${{ steps.context.outputs.ref }}
+    steps:
+      - id: context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EVENT_NAME" != "workflow_call" ]] || { echo "::error::Reusable workflow context lost caller event"; exit 1; }
+          printf 'event_name=%s\nref=%s\n' "$EVENT_NAME" "$REF" >> "$GITHUB_OUTPUT"
