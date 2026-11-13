@@ -6,6 +6,92 @@ code behavior, not proof that AWS roles, GitHub environments, branch rules, or
 staging resources have been activated. Human-applied bootstrap and real-cloud
 acceptance are still required.
 
+## Start here: you are setting up a customer's environment
+
+**Current status: in progress, not an activated customer onboarding service.**
+The shared code has local tests, but that is not evidence that it works with a
+customer's AWS account, GitHub settings, or signing key. Activation requires
+reviewed, merged, tested immutable workflow references and verified outputs
+from the customer's bootstrap. Missing values mean **stop**, not guess.
+
+This document covers approval and delivery into **staging**, a pre-production
+environment. It does not create the customer's AWS account, network, cluster,
+databases, or application deployments. Those belong to the infrastructure,
+GitOps, and application owners' runbooks. Copying an image to the registry does
+not itself start an application. Production is outside this runbook.
+
+The examples below identify Celoria's repositories. The Terraform gate is
+currently restricted to `Celoria-Industries/infrastructure-as-code`; changing
+environment variables alone does not support a different customer's
+repository. A new company needs reviewed code/configuration changes and its own
+verified repository/account identities, not a wildcard trust policy.
+
+### Terms you will encounter
+
+| Term | Plain-language meaning |
+|---|---|
+| AWS member account | The customer's isolated AWS account within an organization. Its 12-digit ID identifies the destination; an account name is not sufficient. |
+| Bootstrap account | The separate account holding shared setup resources, including Terraform state and the signing key in this design. It is not the staging deployment account. |
+| PR (pull request) / review / merge | A PR proposes a repository change. A review records a person's approval of a particular revision. A merge adds that revision to `main`. These are different events, and none by itself proves deployment. |
+| Workflow / job / run | A workflow is a GitHub Actions automation file; a job is an isolated part of it. A run is one execution. A rerun has a different attempt number, which must also match the evidence. |
+| GitHub Environment | A named configuration context such as `staging-plan`, not an AWS account or a running cluster. Administrators configure its variables and access controls. |
+| Commit SHA / pinned reference | An exact source revision. A full immutable SHA fixes the workflow version; `main` or a tag can change and is not an acceptable staging trust pin. |
+| Image / ECR / digest | An image packages an application. ECR is AWS's image registry. A digest fingerprints the exact image; promotion copies it unchanged rather than rebuilding. |
+| Terraform root / state / saved plan | The root is a stack's directory. State tracks managed infrastructure. A saved plan is the proposed changes captured in a file; applying it can create, change, or delete resources. |
+| Artifact / evidence / manifest | An artifact is a stored workflow output. Evidence records its origin and fingerprints. The promotion manifest is the JSON file a human reviews to select the exact evidence and staging target. |
+| IAM role / trust / OIDC subject | An IAM role grants AWS permissions. Its trust policy controls who can obtain those permissions. OIDC lets AWS check a short-lived GitHub identity, including the repository, environment, and pinned reusable workflow. It is not a stored AWS password. |
+| KMS signature / public key / ARN | KMS keeps a private signing key in AWS. Its signature detects changes to the evidence; the public key verifies it without private-key access. An ARN is the exact AWS resource identifier. Signing does not approve the proposed infrastructure changes. |
+| Fail closed | If a required check cannot be proved, stop without granting staging write access. Do not remove the check to make the run succeed. |
+
+### Who authorizes what?
+
+An AWS administrator performs the **human bootstrap**: account setup, IAM
+permissions, and the KMS key. A repository administrator configures GitHub
+environments, branch rules, and OIDC identity settings. These are reviewed
+setup operations, not effects of approving a promotion PR.
+
+A source reviewer approves code/configuration. Later, a different person from
+the promotion PR author approves **which exact image or saved plan may go to
+which staging target**. The source PR is not that later approval. GitHub Team
+private repositories do not provide the required Environment-reviewer gate
+used by some other plans; this design uses the reviewed promotion PR instead.
+
+Only an invocation of the configured promotion caller runs the shared gate.
+After all checks pass, the fixed job can request staging write credentials
+and copy the image or apply the saved plan. Whether a caller is manually
+dispatched or triggered by a repository event is defined in that repository;
+do not assume clicking Approve or Merge runs deployment. Check its workflow
+and resulting Actions run.
+
+Planning reads state and AWS resources using scoped planning credentials.
+Signing runs in a separate job with only signing permission. Applying runs in
+a third context with deployment permission, after signature and approval
+checks. Untrusted Terraform/providers never receive signing credentials.
+These separations must exist in IAM, not just in the job names.
+
+### Ordered setup and first-promotion checklist
+
+Keep an onboarding record in the owning infrastructure runbook/ticket. Record
+non-secret identifiers and links to evidence, not credentials or plan contents.
+Complete each row before proceeding to the next.
+
+| Order / owner | What to obtain or do | Evidence required before proceeding |
+|---|---|---|
+| 1. Operator with infrastructure owner | Identify the company, staging scope, repositories, region, and named AWS/repository/review owners. | Confirmed destination and ownership; no example IDs or unresolved placeholders. |
+| 2. AWS administrator | Follow the infrastructure account/bootstrap runbook; create the reviewed account/state/role/key resources with staging writers disabled. | Human-applied stack outputs: member/bootstrap account IDs, state bucket, role ARNs, immutable key ARN and public key. Confirm these against AWS identity/resource records. |
+| 3. Repository administrator | Confirm repository IDs, protected `main`, required checks, review access, and private artifact access. Inventory every AWS credential job before changing OIDC settings. | Current settings and inventory, including Dev/global jobs; compatible reusable jobs and exact non-staging trusts reviewed. Old rule snapshots below are not acceptance evidence. |
+| 4. Delivery and IAM owners | Merge/review the central and caller workflows; select tested full workflow SHAs. Populate the environment variables listed below from verified bootstrap outputs and those SHAs. | Exact workflow paths/SHAs and variable-to-output mapping. Planner/signer target/root/key values agree with staging; no caller-selectable roles or targets. |
+| 5. AWS/repository administrators | Follow the coordinated OIDC migration order below. Enable only the needed read-only planning and isolated signing trusts first; keep staging apply/image writers disabled. | Actual emitted subjects match repository ID, environment, and immutable workflow. Negative checks reject the wrong repo/environment/SHA and legacy staging identities; Dev/global identity checks still work. |
+| 6. Signing and infrastructure owners | Verify the pinned public key and signing canary, state-to-member planning role chain, and a reviewed staging plan. Or, for images, verify a successful pinned main image producer and its digest. | Real-cloud acceptance record with run/attempt, account/root and artifact IDs/digests or image digest. Local unit tests alone are insufficient. |
+| 7. Operator and qualified reviewer | Create the separate promotion PR containing only `.github/staging-promotion.json`. For Terraform, use the producer's generated fields and review the actual proposed changes, including deletions and permissions; the action-count summary alone is insufficient. | Current non-author human approval on the exact PR head, successful checks, merge, and matching source/run/target evidence. Never paste sensitive plan contents into a public record. |
+| 8. AWS administrator, then operator | After all prerequisites are accepted, enable only exact staging writer trust. Invoke the owning repository's configured promotion caller with the merged promotion PR number. | Gate checks precede credential steps; record the Actions result and exact promoted digest or applied plan identity. A failed run is not a deployment receipt. |
+| 9. Application/GitOps owner | Follow the service rollout and health-check runbooks after delivery. | Independently verified running services and environment acceptance. An ECR copy or Terraform success alone does not prove application readiness. |
+
+Nothing here automatically creates accounts, changes GitHub settings, enables
+IAM trust, retrieves a private key, starts production, or repairs a failed
+deployment. The workflows perform their documented operations only when
+invoked with configured, authorized identities.
+
 ## Trust boundary and approval
 
 Promotion is not authorized by a source-code PR, a workflow dispatch, a
@@ -292,3 +378,30 @@ S3 state access, confirm repository artifact access/retention, and run a
 reviewed staging plan. No live AWS writes, GitHub settings changes, key
 retrieval, or infrastructure apply are performed by this shared workflow
 change.
+
+## Stop, retry, and rollback
+
+Stop on an unknown account/root, missing configuration, unexpected OIDC
+identity, absent protected-main evidence, expired artifact, stale approval,
+digest/signature mismatch, or failed/incomplete checks. Save the failed run
+link and error message for the owning administrator. Do not substitute a new
+artifact in an approved manifest, change the key pin to match unknown evidence,
+or add legacy/wildcard IAM trust.
+
+If a setup problem caused the failure, have its owner fix it through the
+reviewed setup process and repeat the acceptance checks. For expired or changed
+evidence, produce fresh artifacts and obtain a new promotion PR review.
+Rerunning a producer changes its attempt: use the new exact evidence, not an
+old approval. For a failed promotion, first inspect which steps executed;
+failure after AWS credentials or during Terraform apply may mean partial
+changes. Have the infrastructure owner inspect state/resources before deciding
+whether the saved plan can be retried or a new reviewed plan is necessary.
+
+Rollback is also a change requiring authorization. Disable staging writer
+trust first when the identity/trust configuration is suspect, then follow the
+coordinated OIDC rollback below the environment table. This stops future access;
+it does not undo resources already changed. Reverting a GitHub commit or
+closing a PR does not undo AWS changes or roll back an application. Restore
+infrastructure through a new reviewed plan and restore an application through
+its deployment runbook and reviewed known-good image. Never delete Terraform
+state or signing keys as a shortcut to recovery.
