@@ -22,6 +22,8 @@ from verify_promotion import (  # noqa: E402
     validate_terraform_artifact,
     validate_terraform_manifest,
     validate_supported_kind,
+    validate_plan_layer_pr,
+    terraform_root_for_layer,
 )
 
 
@@ -174,13 +176,47 @@ class StagingPromotionGateTest(unittest.TestCase):
         step = step.split("\n      - name:", 1)[0]
         self.assertIn("          digest-mismatch: error\n", step + "\n")
 
+    def test_plan_passes_validated_account_id_to_root_module(self):
+        step = PLAN_WORKFLOW.split("      - name: Initialize and create the staging saved plan\n", 1)[1]
+        script = step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn('-var="account_id=$TARGET_ACCOUNT_ID"', script)
+        self.assertIn('-var="region=$TARGET_REGION"', script)
+        validation = PLAN_WORKFLOW.split("      - name: Validate fixed staging plan configuration\n", 1)[1]
+        validation_script = validation.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn('[[ "$TARGET_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] ||', validation_script)
+        self.assertIn('[[ "${BASH_REMATCH[1]}" == "$TARGET_ACCOUNT_ID" ]] ||', validation_script)
+
+    def test_plan_layer_is_allowlisted_and_matches_source_pr_label(self):
+        expected = {
+            "foundation": "stacks/celoria-industries/staging/foundation",
+            "nervous-system": "stacks/celoria-industries/staging/nervous-system",
+            "service-bootstrap": "stacks/celoria-industries/staging/service-bootstrap",
+        }
+        for layer, root in expected.items():
+            with self.subTest(layer=layer):
+                self.assertEqual(terraform_root_for_layer(layer), root)
+                self.assertEqual(
+                    validate_plan_layer_pr({"labels": [{"name": f"staging-plan:{layer}"}]}, layer),
+                    root,
+                )
+        for layer, labels in (
+            ("foundation", []),
+            ("foundation", [{"name": "staging-plan:foundation"}, {"name": "staging-plan:nervous-system"}]),
+            ("foundation", [{"name": "staging-plan:made-up"}]),
+            ("foundation", [{"name": None}]),
+            ("unknown", [{"name": "staging-plan:unknown"}]),
+        ):
+            with self.subTest(layer=layer, labels=labels), self.assertRaises(GateError):
+                validate_plan_layer_pr({"labels": labels}, layer)
+
     def test_staging_region_must_be_explicit_before_credentials(self):
         for workflow, step_name, env in (
             (PLAN_WORKFLOW, "Validate fixed staging plan configuration", {
                 "STATE_ROLE_ARN": "arn:aws:iam::111111111111:role/state",
                 "DEPLOY_ROLE_ARN": "arn:aws:iam::222222222222:role/deploy",
                 "STATE_BUCKET": "example-state", "TARGET_ACCOUNT_ID": "222222222222",
-                "TARGET_REGION": "us-east-2", "TERRAFORM_ROOT": "stacks/example/staging/network",
+                "TARGET_REGION": "us-east-2", "PLAN_LAYER": "foundation",
+                "TERRAFORM_ROOT": "stacks/celoria-industries/staging/foundation",
                 "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
             }),
             (PLAN_WORKFLOW, "Validate isolated KMS signer identity", {
@@ -192,7 +228,8 @@ class StagingPromotionGateTest(unittest.TestCase):
                 "STATE_ROLE_ARN": "arn:aws:iam::111111111111:role/state",
                 "DEPLOY_ROLE_ARN": "arn:aws:iam::222222222222:role/deploy",
                 "STATE_BUCKET": "example-state", "TARGET_ACCOUNT_ID": "222222222222",
-                "TARGET_REGION": "us-east-2", "TERRAFORM_ROOT": "stacks/example/staging/network",
+                "TARGET_REGION": "us-east-2", "PLAN_LAYER": "foundation",
+                "TERRAFORM_ROOT": "stacks/celoria-industries/staging/foundation",
                 "SIGNING_KEY_ARN": "arn:aws:kms:us-east-2:111111111111:key/" + "a" * 36,
                 "PUBLIC_KEY": "YWJj", "TRUSTED_PLAN_WORKFLOW": PLAN_WORKFLOW_REF,
             }),
@@ -411,6 +448,7 @@ class StagingPromotionGateTest(unittest.TestCase):
                 "evidence_artifact_digest": "sha256:" + "3" * 64,
                 "target_account_id": "123456789012",
                 "target_region": "us-east-2",
+                "plan_layer": "foundation",
                 "terraform_root": "stacks/celoria-industries/staging/foundation",
                 "signing_key_arn": "arn:aws:kms:us-east-2:999999999999:key/12345678-1234-1234-1234-123456789012",
                 "signing_algorithm": "RSASSA_PSS_SHA_256",
@@ -423,11 +461,18 @@ class StagingPromotionGateTest(unittest.TestCase):
             {
                 "target_account_id": "123456789012",
                 "target_region": "us-east-2",
-                "terraform_root": "stacks/celoria-industries/staging/foundation",
                 "signing_key_arn": manifest["source"]["signing_key_arn"],
             },
         )
         self.assertEqual(source["plan_artifact_id"], 102)
+        wrong_layer = {**manifest, "source": {**manifest["source"], "plan_layer": "nervous-system"}}
+        with self.assertRaisesRegex(GateError, "root does not match"):
+            validate_terraform_manifest(
+                wrong_layer,
+                "Celoria-Industries/infrastructure-as-code",
+                PLAN_WORKFLOW_REF,
+                {},
+            )
         manifest["source"]["evidence_artifact_id"] = manifest["source"]["plan_artifact_id"]
         with self.assertRaisesRegex(GateError, "must be separate artifacts"):
             validate_terraform_manifest(

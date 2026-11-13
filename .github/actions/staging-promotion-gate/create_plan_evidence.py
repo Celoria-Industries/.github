@@ -1,6 +1,5 @@
 import hashlib
 import os
-import re
 import sys
 
 from plan_evidence import EvidenceError, canonical_record
@@ -11,7 +10,9 @@ from verify_promotion import (
     parse_positive_int,
     repository_file,
     validate_full_sha,
+    validate_plan_layer_pr,
     validate_reviewed_pr,
+    terraform_root_for_layer,
     approval_mode,
 )
 
@@ -20,11 +21,6 @@ WORKFLOW_PATH = ".github/workflows/staging-terraform-plan.yml"
 PLAN_REPOSITORY = "Celoria-Industries/infrastructure-as-code"
 PLAN_ARTIFACT_NAME = "staging-terraform-plan"
 EVIDENCE_ARTIFACT_NAME = "staging-terraform-evidence"
-PLAN_ROOT_PATTERN = re.compile(
-    r"stacks/[a-z0-9][a-z0-9-]*/staging/[a-z0-9][a-z0-9-]*(?:/[a-z0-9][a-z0-9-]*)*"
-)
-
-
 def require(condition, message):
     if not condition:
         raise GateError(message)
@@ -41,9 +37,13 @@ def main():
     require(repository == PLAN_REPOSITORY,
             f"Terraform plan producer is restricted to {PLAN_REPOSITORY}")
     source_pr_number = parse_positive_int(required_env("SOURCE_PR_NUMBER"), "SOURCE_PR_NUMBER")
+    plan_layer = required_env("STAGING_PLAN_LAYER")
+    terraform_root = terraform_root_for_layer(plan_layer)
     source_pr, source_head = validate_reviewed_pr(
-        GitHubApi(), repository, source_pr_number
+        GitHubApi(), repository, source_pr_number,
+        solo_source_extras={"plan_layer": plan_layer, "terraform_root": terraform_root},
     )
+    validate_plan_layer_pr(source_pr, plan_layer)
     source_merge = validate_full_sha(source_pr.get("merge_commit_sha"), "source PR merge SHA")
     expected_head = validate_full_sha(required_env("SOURCE_PR_HEAD_SHA"), "SOURCE_PR_HEAD_SHA")
     require(source_head == expected_head, "Source PR head changed after plan creation")
@@ -113,14 +113,11 @@ def main():
         require(account_id == required_env("STAGING_SOLO_TARGET_ACCOUNT_ID")
                 and region == required_env("STAGING_SOLO_TARGET_REGION"),
                 "Solo source authorization does not match the Terraform staging target")
-    terraform_root = required_env("STAGING_PLAN_ROOT")
     key_arn = required_env("STAGING_PLAN_SIGNING_KEY_ARN")
     require(re.fullmatch(r"[0-9]{12}", account_id) is not None,
             "STAGING_PLAN_TARGET_ACCOUNT_ID must be a 12-digit AWS account ID")
     require(re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-[0-9]", region) is not None,
             "STAGING_PLAN_TARGET_REGION is invalid")
-    require(PLAN_ROOT_PATTERN.fullmatch(terraform_root) is not None,
-            "STAGING_PLAN_ROOT must be a staging stack path")
     require(re.fullmatch(r"arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f-]{36}", key_arn) is not None,
             "STAGING_PLAN_SIGNING_KEY_ARN must be an immutable KMS key ARN")
 
@@ -142,6 +139,7 @@ def main():
         "plan_sha256": f"sha256:{plan_digest}",
         "target_account_id": account_id,
         "target_region": region,
+        "plan_layer": plan_layer,
         "terraform_root": terraform_root,
         "signing_key_arn": key_arn,
         "signing_algorithm": "RSASSA_PSS_SHA_256",

@@ -49,6 +49,7 @@ def evidence_record():
         "plan_sha256": PLAN_DIGEST,
         "target_account_id": "123456789012",
         "target_region": "us-east-2",
+        "plan_layer": "foundation",
         "terraform_root": "stacks/celoria-industries/staging/foundation",
         "signing_key_arn": "arn:aws:kms:us-east-2:123456789012:key/12345678-1234-1234-1234-123456789012",
         "signing_algorithm": "RSASSA_PSS_SHA_256",
@@ -175,6 +176,15 @@ class StagingPlanEvidenceTest(unittest.TestCase):
     def test_rejects_duplicate_record_keys(self):
         with self.assertRaisesRegex(EvidenceError, "duplicate JSON keys"):
             strict_record(b'{"target":"staging","target":"production"}')
+
+    def test_layer_and_root_must_match_exact_allowlist(self):
+        for layer, root in (
+            ("nervous-system", "stacks/celoria-industries/staging/foundation"),
+            ("foundation", "stacks/celoria-industries/staging/nervous-system"),
+            ("unknown", "stacks/celoria-industries/staging/unknown"),
+        ):
+            with self.subTest(layer=layer, root=root), self.assertRaises(EvidenceError):
+                canonical_record({**self.record, "plan_layer": layer, "terraform_root": root})
 
     def test_rejects_changed_target_and_stale_producer(self):
         with self.assertRaisesRegex(EvidenceError, "does not match target"):

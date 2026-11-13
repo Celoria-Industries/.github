@@ -9,6 +9,7 @@ import urllib.parse
 import urllib.request
 
 from plan_evidence import EvidenceError, strict_record, verify_plan_bytes, verify_plan_evidence
+from plan_layers import PLAN_LAYER_ROOTS
 from solo_approval import SoloApprovalError, verify_comment
 
 
@@ -164,7 +165,27 @@ def verify_solo_pr(api, repository, number, head_sha, purpose, extras=None):
         raise GateError(str(error)) from error
 
 
-def validate_reviewed_pr(api, repository, number, required_head=None, promotion=False):
+def terraform_root_for_layer(layer):
+    require(isinstance(layer, str) and layer in PLAN_LAYER_ROOTS,
+            "Plan layer must be foundation, nervous-system, or service-bootstrap")
+    return PLAN_LAYER_ROOTS[layer]
+
+
+def validate_plan_layer_pr(pr, expected_layer):
+    expected_root = terraform_root_for_layer(expected_layer)
+    labels = []
+    for label in pr.get("labels", []):
+        name = label.get("name") if isinstance(label, dict) else None
+        if isinstance(name, str) and name.startswith("staging-plan:"):
+            labels.append(name)
+    require(len(labels) == 1, "Source PR must have exactly one staging-plan:<layer> label")
+    label_layer = labels[0].removeprefix("staging-plan:")
+    require(label_layer == expected_layer,
+            "Source PR staging-plan label does not match the requested plan layer")
+    return expected_root
+
+
+def validate_reviewed_pr(api, repository, number, required_head=None, promotion=False, solo_source_extras=None):
     pr = api.get(f"/repos/{repository}/pulls/{number}")
     require(pr.get("state") == "closed" and pr.get("merged_at"), f"PR #{number} is not merged")
     require(pr.get("base", {}).get("ref") == "main", f"PR #{number} must target main")
@@ -200,7 +221,7 @@ def validate_reviewed_pr(api, repository, number, required_head=None, promotion=
     if approval_mode() == "independent":
         require(approved, f"PR #{number} lacks a current human approval on its exact head")
     elif not promotion:
-        verify_solo_pr(api, repository, number, head_sha, "source")
+        verify_solo_pr(api, repository, number, head_sha, "source", solo_source_extras)
 
     check_runs = []
     for page in range(1, 101):
@@ -381,6 +402,7 @@ def validate_terraform_manifest(manifest, repository, trusted_workflow, expected
             "evidence_artifact_digest",
             "target_account_id",
             "target_region",
+            "plan_layer",
             "terraform_root",
             "signing_key_arn",
             "signing_algorithm",
@@ -435,11 +457,9 @@ def validate_terraform_manifest(manifest, repository, trusted_workflow, expected
         and re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-[0-9]", source["target_region"]) is not None,
         "Terraform target_region is invalid",
     )
-    require(
-        isinstance(source["terraform_root"], str)
-        and re.fullmatch(r"stacks/[a-z0-9][a-z0-9-]*/staging/[a-z0-9][a-z0-9-]*(?:/[a-z0-9][a-z0-9-]*)*", source["terraform_root"]) is not None,
-        "Terraform root must be a staging stack path",
-    )
+    expected_root = terraform_root_for_layer(source["plan_layer"])
+    require(source["terraform_root"] == expected_root,
+            "Terraform root does not match the selected staging plan layer")
     for key, value in expected.items():
         require(source.get(key) == value, f"Terraform promotion does not match configured {key}")
     return source
@@ -482,8 +502,13 @@ def validate_terraform_artifact(api, repository, artifact_id, name, digest, run_
 
 def validate_source_terraform_run(api, repository, source, trusted_workflow):
     source_pr, source_head = validate_reviewed_pr(
-        api, repository, source["pull_request_number"]
+        api, repository, source["pull_request_number"],
+        solo_source_extras={
+            "plan_layer": source["plan_layer"],
+            "terraform_root": source["terraform_root"],
+        },
     )
+    validate_plan_layer_pr(source_pr, source["plan_layer"])
     require(source_head == source["pull_request_head_sha"],
             "Terraform source PR head changed after plan creation")
     merge_sha = validate_full_sha(source_pr.get("merge_commit_sha"), "Terraform source PR merge SHA")
@@ -567,6 +592,7 @@ def verify_local_terraform_artifacts(source, expected):
         "plan_sha256": source["plan_sha256"],
         "target_account_id": source["target_account_id"],
         "target_region": source["target_region"],
+        "plan_layer": source["plan_layer"],
         "terraform_root": source["terraform_root"],
         "signing_key_arn": source["signing_key_arn"],
         "signing_algorithm": source["signing_algorithm"],
@@ -615,15 +641,23 @@ def main():
             require(os.environ.get("STAGING_PLAN_TARGET_ACCOUNT_ID") == os.environ.get("STAGING_SOLO_TARGET_ACCOUNT_ID")
                     and os.environ.get("STAGING_PLAN_TARGET_REGION") == os.environ.get("STAGING_SOLO_TARGET_REGION"),
                     "Solo source authorization does not match the Terraform staging target")
+        plan_layer = os.environ.get("STAGING_PLAN_LAYER", "")
+        terraform_root = terraform_root_for_layer(plan_layer)
         pr_number = parse_positive_int(os.environ.get("SOURCE_PR_NUMBER"), "source-pr-number")
         api = GitHubApi()
-        source_pr, head_sha = validate_reviewed_pr(api, repository, pr_number)
+        source_pr, head_sha = validate_reviewed_pr(
+            api, repository, pr_number,
+            solo_source_extras={"plan_layer": plan_layer, "terraform_root": terraform_root},
+        )
+        validate_plan_layer_pr(source_pr, plan_layer)
         merge_sha = validate_full_sha(source_pr.get("merge_commit_sha"), f"PR #{pr_number} merge SHA")
         write_outputs({
             "source_pr_number": pr_number,
             "source_pull_request_head_sha": head_sha,
             "source_pull_request_merge_sha": merge_sha,
             "source_commit": merge_sha,
+            "plan_layer": plan_layer,
+            "terraform_root": terraform_root,
         })
         print(f"Verified reviewed source PR #{pr_number} at merge commit {merge_sha}")
         return
@@ -681,7 +715,6 @@ def main():
         expected = {
             "target_account_id": os.environ.get("STAGING_PLAN_TARGET_ACCOUNT_ID", ""),
             "target_region": os.environ.get("STAGING_PLAN_TARGET_REGION", ""),
-            "terraform_root": os.environ.get("STAGING_PLAN_ROOT", ""),
             "signing_key_arn": os.environ.get("STAGING_PLAN_SIGNING_KEY_ARN", ""),
         }
         require(all(expected.values()), "Staging Terraform target, root, and signing key must be configured")
@@ -694,6 +727,7 @@ def main():
             solo_created = verify_solo_pr(api, repository, pr_number, head_sha, "promotion", {
                 "manifest_sha256": f"sha256:{manifest_sha}",
                 "target_resource": target_resource,
+                "plan_layer": source["plan_layer"],
             })
         source_pr = validate_source_terraform_run(api, repository, source, trusted_workflow)
         verify_local_terraform_artifacts(source, expected)
@@ -707,6 +741,8 @@ def main():
             "producer_run_id": source["workflow_run_id"],
             "plan_artifact_id": source["plan_artifact_id"],
             "evidence_artifact_id": source["evidence_artifact_id"],
+            "plan_layer": source["plan_layer"],
+            "terraform_root": source["terraform_root"],
         }
 
     outputs["approval_mode"] = approval_mode()

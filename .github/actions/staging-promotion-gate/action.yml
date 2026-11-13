@@ -2,7 +2,7 @@ name: Staging promotion gate
 description: Verify reviewed staging-promotion metadata and its immutable source evidence
 inputs:
   operation:
-    description: Action operation, either verify or prepare-plan-evidence
+    description: Action operation, either verify, prepare-plan-evidence, or consume-solo
     required: false
     default: verify
   promotion-pr-number:
@@ -49,8 +49,8 @@ inputs:
     description: Protected staging member-account region
     required: false
     default: ""
-  plan-root:
-    description: Protected staging Terraform root path
+  plan-layer:
+    description: Allowlisted Terraform staging layer enum
     required: false
     default: ""
   plan-signing-key-arn:
@@ -201,6 +201,12 @@ outputs:
   source-pull-request-merge-sha:
     description: Exact source pull request merge commit
     value: ${{ steps.verify.outputs.source_pull_request_merge_sha }}
+  plan-layer:
+    description: Verified staging Terraform layer
+    value: ${{ steps.verify.outputs.plan_layer }}
+  terraform-root:
+    description: Exact allowlisted staging Terraform root
+    value: ${{ steps.verify.outputs.terraform_root }}
 runs:
   using: composite
   steps:
@@ -250,7 +256,7 @@ runs:
         STAGING_TRUSTED_PLAN_WORKFLOW: ${{ inputs.trusted-plan-producer-workflow }}
         STAGING_PLAN_TARGET_ACCOUNT_ID: ${{ inputs.plan-target-account-id }}
         STAGING_PLAN_TARGET_REGION: ${{ inputs.plan-target-region }}
-        STAGING_PLAN_ROOT: ${{ inputs.plan-root }}
+        STAGING_PLAN_LAYER: ${{ inputs.plan-layer }}
         STAGING_PLAN_SIGNING_KEY_ARN: ${{ inputs.plan-signing-key-arn }}
         STAGING_APPROVAL_MODE: ${{ inputs.approval-mode }}
         STAGING_SOLO_AUTHORIZER_ID: ${{ inputs.solo-authorizer-id }}
@@ -276,7 +282,7 @@ runs:
         EVIDENCE_SIGNATURE_PATH: ${{ inputs.evidence-signature-path }}
         STAGING_PLAN_TARGET_ACCOUNT_ID: ${{ inputs.plan-target-account-id }}
         STAGING_PLAN_TARGET_REGION: ${{ inputs.plan-target-region }}
-        STAGING_PLAN_ROOT: ${{ inputs.plan-root }}
+        STAGING_PLAN_LAYER: ${{ inputs.plan-layer }}
         STAGING_PLAN_SIGNING_KEY_ARN: ${{ inputs.plan-signing-key-arn }}
         STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64: ${{ inputs.plan-signing-public-key-der-b64 }}
         STAGING_APPROVAL_MODE: ${{ inputs.approval-mode }}

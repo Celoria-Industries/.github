@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 
+from plan_layers import PLAN_LAYER_ROOTS
 
 class EvidenceError(Exception):
     pass
@@ -29,6 +30,7 @@ RECORD_KEYS = {
     "plan_sha256",
     "target_account_id",
     "target_region",
+    "plan_layer",
     "terraform_root",
     "signing_key_arn",
     "signing_algorithm",
@@ -93,11 +95,11 @@ def canonical_record(record):
     require(isinstance(record.get("target_region"), str)
             and re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-[0-9]", record["target_region"]) is not None,
             "Signed Terraform evidence target_region is invalid")
-    require(
-        isinstance(record.get("terraform_root"), str)
-        and re.fullmatch(r"stacks/[a-z0-9][a-z0-9-]*/staging/[a-z0-9][a-z0-9-]*(?:/[a-z0-9][a-z0-9-]*)*", record["terraform_root"]) is not None,
-        "Signed Terraform evidence terraform_root must be a staging stack path",
-    )
+    require(isinstance(record.get("plan_layer"), str)
+            and record["plan_layer"] in PLAN_LAYER_ROOTS,
+            "Signed Terraform evidence plan_layer is not supported")
+    require(record.get("terraform_root") == PLAN_LAYER_ROOTS[record["plan_layer"]],
+            "Signed Terraform evidence root does not match the plan layer")
     require(
         isinstance(record.get("signing_key_arn"), str)
         and re.fullmatch(
