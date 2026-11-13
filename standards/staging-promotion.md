@@ -58,6 +58,8 @@ the promotion PR author approves **which exact image or saved plan may go to
 which staging target**. The source PR is not that later approval. GitHub Team
 private repositories do not provide the required Environment-reviewer gate
 used by some other plans; this design uses the reviewed promotion PR instead.
+The experimental solo mode described below substitutes a single operator's
+explicit authorizations and does not provide independent oversight.
 
 Only an invocation of the configured promotion caller runs the shared gate.
 Currently it stops before requesting staging write credentials. In a future
@@ -125,8 +127,9 @@ rules before activation if protected main is a deployment prerequisite. Recheck
 these settings immediately before enabling roles; this snapshot can become
 stale.
 
-The central reusable workflow accepts only `promotion-pr-number`. Its disabled
-prototype contains copy/apply logic and selects roles and targets from
+The central reusable workflow accepts a `promotion-pr-number` and, in solo
+mode, two authorization comment IDs. Its disabled prototype contains
+copy/apply logic and selects roles and targets from
 environment configuration. It does not expose a caller-controlled role,
 command, script, artifact URL, Terraform root, signing key, or AWS operation.
 This does not prevent Terraform configuration or provider code from executing
@@ -144,11 +147,86 @@ The staging gate contract is:
 
 | Workflow | Caller inputs | Reusable-workflow outputs |
 |---|---|---|
-| `staging-promotion-gate.yml` | `promotion-pr-number` (`number`, required) | `promotion-kind`, `source-commit`, `promoted-digest` (image only), `producer-run-id`, `plan-artifact-id`, `evidence-artifact-id` (Terraform only) |
-| `staging-terraform-plan.yml` | `source-pr-number` (`number`, required) | `plan-artifact-id`, `plan-artifact-digest`, `evidence-artifact-id`, `evidence-artifact-digest` |
+| `staging-promotion-gate.yml` | `promotion-pr-number` (`number`, required); `source-authorization-comment-id` and `promotion-authorization-comment-id` (`string`, solo only) | `promotion-kind`, `source-commit`, `promoted-digest` (image only), `producer-run-id`, `plan-artifact-id`, `evidence-artifact-id` (Terraform only) |
+| `staging-terraform-plan.yml` | `source-pr-number` (`number`, required); `source-authorization-comment-id` (`string`, solo only) | `plan-artifact-id`, `plan-artifact-digest`, `evidence-artifact-id`, `evidence-artifact-digest` |
 
 No reusable-workflow input selects a role, signing key, target account,
 Terraform root, command, or artifact.
+
+## Experimental solo authorization
+
+The default mode remains `independent`: the existing non-author human reviews
+are required. The separately configured `solo` mode accepts two issue comments
+instead: one on the source PR and a later one on the promotion PR. Both
+promotion paths remain unconditionally disabled, and configuring a mode does
+not enable them. The comments are attributed to a pinned GitHub user ID, not
+proof that a person was present or reviewed the changes: an API token for that
+account can create them. Solo operation has no independent second reviewer and
+does not protect against a compromised operator or mistaken approval.
+
+The raw comment body must be an exact JSON object, without extra or duplicate
+keys. After inspecting the source PR, the operator posts this on that PR:
+
+```json
+{"schema_version":1,"type":"source","repository_id":123,"pull_request":41,"head_sha":"<source PR head SHA>","target":"staging","account_id":"<staging account ID>","region":"<staging region>"}
+```
+
+After the image or plan evidence exists, the operator inspects it and posts
+this separate comment on the promotion PR:
+
+```json
+{"schema_version":1,"type":"promotion","repository_id":123,"pull_request":42,"head_sha":"<promotion PR head SHA>","target":"staging","account_id":"<staging account ID>","region":"<staging region>","manifest_sha256":"sha256:<SHA-256 of exact manifest bytes>","target_resource":"<staging ECR registry/repository or Terraform root>"}
+```
+
+Numbers above are examples, not customer values. The hash binds every manifest
+field, including image digest or both plan/evidence IDs and digests, source,
+producer run and attempt. The target resource and account/region are checked
+separately against configured staging values. The source and promotion PRs
+must still be merged to main with successful checks. Pass each comment's
+numeric ID using the workflow inputs; a comment ID is not a permission grant.
+
+The verifier checks GitHub's issue-comment ID, issue URL, user ID and type,
+body, creation time, update time and GitHub App attribution. It rejects
+missing/deleted comments, comments reporting an edit, extra fields, duplicate
+keys, changed values, future timestamps and comments older than the configured
+limit (maximum 24 hours). GitHub exposes timestamps at second precision:
+equal creation and update timestamps do **not** prove an edit never occurred
+within that second. The gate verifies the exact current body, but a stolen
+operator token could create or alter authorization; retain the records and
+protect the account and tokens.
+
+Before any staging writer credentials, a separate `staging-authorization`
+job revalidates the evidence, then uses its audit-only role to make one
+conditional insert into the consumption table. A duplicate authorization,
+table failure or ambiguous response fails closed. Even if no deployment
+occurred, a failed/ambiguous consumption or partially completed deployment
+requires investigation and a new authorization comment; a rerun cannot reuse
+the consumed one. Record the Actions run, attempt, comment IDs and table item.
+The writer job rechecks the evidence after consumption.
+
+The table has a string partition key `authorization_id` with value
+`<repository-id>:<promotion-comment-id>`, no sort key and no TTL. The job
+stores both PR heads/IDs, authorization time, target, manifest hash and run
+identity. A reviewed role may call only `dynamodb:PutItem` on this exact table;
+the role has no signer, state or deployment access. The workflow supplies
+`attribute_not_exists(authorization_id)`; IAM permission for PutItem alone
+does not enforce that condition. Restrict assumption to the exact immutable
+central workflow, caller repository ID and `staging-authorization` context;
+protect the table from deletion, replacement and other writers. Restoring a
+table without consumption records can enable replay. Infrastructure owners
+must verify retention, backup/recovery, and CloudTrail coverage.
+
+Configure `STAGING_APPROVAL_MODE`, `STAGING_SOLO_AUTHORIZER_ID`,
+`STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS`, `STAGING_SOLO_TARGET_ACCOUNT_ID`,
+and `STAGING_SOLO_TARGET_REGION` consistently in the relevant `staging`,
+`staging-plan`, and `staging-plan-signing` environments. The separate
+`staging-authorization` environment needs the solo values, the trusted
+producer/target/public-key variables needed to revalidate the applicable
+promotion, and `STAGING_SOLO_LEDGER_ROLE_ARN`, `STAGING_SOLO_LEDGER_TABLE_ARN`,
+`STAGING_SOLO_LEDGER_ACCOUNT_ID`, and `STAGING_SOLO_LEDGER_REGION`.
+No mode, role or table is supplied by a caller input. These are configuration
+requirements for a future acceptance exercise, not instructions to enable
+trust now.
 
 ## Container image promotion
 
@@ -159,9 +237,8 @@ SHA-256 image digest. The gate resolves the source commit to exactly one merged
 PR targeting `main` and independently verifies its current human approval and
 checks; a direct main push is not eligible. The intended flow checks the run,
 caller wrapper and Dev SHA tag, then copies the image without rebuilding it.
-**Copying is disabled:** the prototype's `podman pull --all` means all tags,
-not all platforms, and the documented `podman push` does not provide the
-prototype's `--all` flag. No real multi-platform transfer has been verified.
+**Copying is disabled:** the prototype now uses `skopeo copy --all
+--preserve-digests`, but no real multi-platform transfer has been verified.
 
 `container-image.yml` can publish without a cache repository. A cache is an
 optional performance feature, not a promotion prerequisite; do not provision
@@ -300,6 +377,12 @@ checksums, but is itself part of the source under review and
 Reviewing the plan alone, matching a signature, or filtering scripts by name
 does not establish the requested boundary.
 
+The operator has accepted the ordinary risk of running Terraform in GitHub
+Actions; this is not a requirement to prove arbitrary Terraform runs without
+credentials. Independently verify least privilege in both accounts. The staging
+member-account SCP does not automatically protect the separate bootstrap
+account's state role, S3 state and lock objects, or state encryption key.
+
 One possible direction is to explicitly trust a separately reviewed, immutable
 Terraform binary and provider set, verify provider package hashes against an
 independently controlled allowlist, pin and inspect all transitive modules,
@@ -315,18 +398,18 @@ An alternative is a separate trusted execution service or credential broker
 with a narrowly defined operation interface, so untrusted plan contents never
 receive raw writer credentials. That is a larger architectural change and
 requires proving that the interface and generated operations express the
-needed Terraform behavior; it is not implemented here. Operators must decide
-which trust model and residual risk are acceptable after security review.
-Before enabling apply, demonstrate the chosen boundary with adversarial tests
-covering nested modules, provisioners, providers and credential redirection,
-as well as real staging acceptance. No current test establishes it.
+needed Terraform behavior; it is not implemented here. Before enabling apply,
+verify actual staging and bootstrap-account policies and trust, test credential
+scope and target identity, and perform real staging acceptance. No current test
+establishes those conditions.
 
 ### Image-copy integrity
 
-A possible replacement is
+A candidate implemented in the disabled prototype is
 [`skopeo copy --all --preserve-digests`](https://github.com/containers/skopeo/blob/main/docs/skopeo-copy.1.md),
 which documents copying the full image list and failing if a digest cannot be
-preserved. This is a candidate, not an implemented or validated fix.
+preserved. The runner must have `skopeo`; the step fails if it is missing.
+This replacement has not been validated with a real transfer.
 Test against real isolated OCI-compatible source and destination registries,
 using a multi-platform fixture with distinct platform manifests and blobs.
 Compare source and destination raw index digest, every child manifest digest,
@@ -338,8 +421,10 @@ asserting workflow text alone cannot establish transfer integrity.
 
 ## Environment configuration and OIDC
 
-The following variables are read only from the named GitHub Environment; no
-role or target value comes from a workflow caller.
+The following variables must be configured for the named GitHub Environment;
+GitHub `vars` can also fall back to repository or organization values, so
+administrators must review those scopes and the effective values. No role or
+target value comes from a workflow caller.
 
 | Environment | Required variables |
 |---|---|

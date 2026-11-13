@@ -99,7 +99,7 @@ class StagingPromotionGateTest(unittest.TestCase):
                 self.assertIn("disabled pending security and integrity validation", result.stdout)
                 self.assertNotIn("continue-on-error", first_step)
         promote = STAGING_WORKFLOW.split("\n  promote:\n", 1)[1]
-        self.assertIn("    needs: verify\n", promote)
+        self.assertIn("    needs: [verify, consume]\n", promote)
         self.assertNotIn("    if:", promote.split("    steps:\n", 1)[0])
 
     def test_promotion_must_be_invoked_from_main(self):

@@ -7,6 +7,11 @@ on:
         description: Merged, human-reviewed infrastructure PR to plan
         required: true
         type: number
+      source-authorization-comment-id:
+        description: Source authorization comment ID when solo mode is configured
+        required: false
+        type: string
+        default: ""
     outputs:
       plan-artifact-id:
         description: Immutable saved-plan artifact ID
@@ -28,6 +33,7 @@ jobs:
   validate-source:
     name: Validate reviewed source PR
     runs-on: ubuntu-latest
+    environment: staging-plan
     permissions:
       checks: read
       contents: read
@@ -40,10 +46,18 @@ jobs:
     steps:
       - name: Validate merged source PR and current human approval
         id: gate
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@58a4ab32b02046ce565f4426c5791a5b43f672ce
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
         with:
           verification-mode: source-pr
           source-pr-number: ${{ inputs.source-pr-number }}
+          plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          approval-mode: ${{ vars.STAGING_APPROVAL_MODE || 'independent' }}
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
 
   plan:
     name: Create read-only staging saved plan
@@ -203,7 +217,7 @@ jobs:
           run-id: ${{ github.run_id }}
 
       - name: Validate provenance and prepare canonical record
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@58a4ab32b02046ce565f4426c5791a5b43f672ce
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
         with:
           operation: prepare-plan-evidence
           source-pr-number: ${{ inputs.source-pr-number }}
@@ -218,6 +232,12 @@ jobs:
           plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
           plan-root: ${{ vars.STAGING_PLAN_ROOT }}
           plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          approval-mode: ${{ vars.STAGING_APPROVAL_MODE || 'independent' }}
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
 
       - name: Validate isolated KMS signer identity
         shell: bash

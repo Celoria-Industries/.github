@@ -7,6 +7,16 @@ on:
         description: Merged PR number containing the reviewed staging-promotion manifest
         required: true
         type: number
+      source-authorization-comment-id:
+        description: Source PR authorization comment ID in solo mode
+        required: false
+        type: string
+        default: ""
+      promotion-authorization-comment-id:
+        description: Promotion PR authorization comment ID in solo mode
+        required: false
+        type: string
+        default: ""
     outputs:
       promotion-kind:
         description: Operation performed by the gate
@@ -50,6 +60,7 @@ jobs:
       producer_run_id: ${{ steps.gate.outputs.producer-run-id }}
       plan_artifact_id: ${{ steps.gate.outputs.plan-artifact-id }}
       evidence_artifact_id: ${{ steps.gate.outputs.evidence-artifact-id }}
+      approval_mode: ${{ steps.gate.outputs.approval-mode }}
     steps:
       - name: Stop disabled staging promotion
         shell: bash
@@ -59,7 +70,7 @@ jobs:
 
       - name: Validate promotion request
         id: gate
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@58a4ab32b02046ce565f4426c5791a5b43f672ce
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           trusted-image-producer-workflow: ${{ vars.STAGING_TRUSTED_IMAGE_WORKFLOW }}
@@ -68,10 +79,134 @@ jobs:
           plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
           plan-root: ${{ vars.STAGING_PLAN_ROOT }}
           plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          approval-mode: ${{ vars.STAGING_APPROVAL_MODE || 'independent' }}
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+          staging-ecr-registry: ${{ vars.STAGING_ECR_REGISTRY }}
+
+  consume:
+    name: Consume solo authorization
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: staging-authorization
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      id-token: write
+      pull-requests: read
+    steps:
+      - name: Require a verified authorization mode
+        env:
+          MODE: ${{ needs.verify.outputs.approval_mode }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$MODE" == "independent" || "$MODE" == "solo" ]] || { echo "::error::Verification did not report a valid authorization mode"; exit 1; }
+
+      - name: Download exact signed Terraform artifacts
+        if: needs.verify.outputs.approval_mode == 'solo' && needs.verify.outputs.promotion_kind == 'terraform'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.verify.outputs.plan_artifact_id }},${{ needs.verify.outputs.evidence_artifact_id }}
+          path: ${{ runner.temp }}/staging-plan-artifacts
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.verify.outputs.producer_run_id }}
+          digest-mismatch: error
+
+      - name: Revalidate solo authorization and image evidence
+        id: image-authorization
+        if: needs.verify.outputs.approval_mode == 'solo' && needs.verify.outputs.promotion_kind == 'image'
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        with:
+          promotion-pr-number: ${{ inputs.promotion-pr-number }}
+          expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
+          trusted-image-producer-workflow: ${{ vars.STAGING_TRUSTED_IMAGE_WORKFLOW }}
+          approval-mode: solo
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+          staging-ecr-registry: ${{ vars.STAGING_ECR_REGISTRY }}
+
+      - name: Revalidate solo authorization and Terraform evidence
+        id: plan-authorization
+        if: needs.verify.outputs.approval_mode == 'solo' && needs.verify.outputs.promotion_kind == 'terraform'
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        with:
+          promotion-pr-number: ${{ inputs.promotion-pr-number }}
+          expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
+          trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
+          plan-artifact-path: ${{ runner.temp }}/staging-plan-artifacts/staging-terraform-plan/tfplan
+          evidence-record-path: ${{ runner.temp }}/staging-plan-artifacts/staging-terraform-evidence/evidence.json
+          evidence-signature-path: ${{ runner.temp }}/staging-plan-artifacts/staging-terraform-evidence/signature.b64
+          plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          plan-root: ${{ vars.STAGING_PLAN_ROOT }}
+          plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          plan-signing-public-key-der-b64: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}
+          approval-mode: solo
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+
+      - name: Validate audit ledger identity
+        if: needs.verify.outputs.approval_mode == 'solo'
+        env:
+          ROLE: ${{ vars.STAGING_SOLO_LEDGER_ROLE_ARN }}
+          TABLE: ${{ vars.STAGING_SOLO_LEDGER_TABLE_ARN }}
+          ACCOUNT: ${{ vars.STAGING_SOLO_LEDGER_ACCOUNT_ID }}
+          REGION: ${{ vars.STAGING_SOLO_LEDGER_REGION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACCOUNT" =~ ^[0-9]{12}$ ]] || { echo "::error::Invalid ledger account"; exit 1; }
+          [[ "$REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Invalid ledger region"; exit 1; }
+          [[ "$ROLE" =~ ^arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9+=,.@_/-]+$ && "${BASH_REMATCH[1]}" == "$ACCOUNT" ]] || { echo "::error::Ledger role account mismatch"; exit 1; }
+          [[ "$TABLE" =~ ^arn:aws:dynamodb:([a-z0-9-]+):([0-9]{12}):table/[A-Za-z0-9_.-]{3,255}$ && "${BASH_REMATCH[1]}" == "$REGION" && "${BASH_REMATCH[2]}" == "$ACCOUNT" ]] || { echo "::error::Ledger table account or region mismatch"; exit 1; }
+
+      - name: Assume the audit-only ledger role
+        if: needs.verify.outputs.approval_mode == 'solo'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.STAGING_SOLO_LEDGER_ROLE_ARN }}
+          aws-region: ${{ vars.STAGING_SOLO_LEDGER_REGION }}
+          role-session-name: StagingAuthorization-${{ github.run_id }}
+
+      - name: Consume the exact solo authorization
+        if: needs.verify.outputs.approval_mode == 'solo'
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
+        with:
+          operation: consume-solo
+          promotion-pr-number: ${{ inputs.promotion-pr-number }}
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+          ledger-role-arn: ${{ vars.STAGING_SOLO_LEDGER_ROLE_ARN }}
+          ledger-table-arn: ${{ vars.STAGING_SOLO_LEDGER_TABLE_ARN }}
+          verified-manifest-sha: ${{ steps.image-authorization.outputs.manifest-sha256 || steps.plan-authorization.outputs.manifest-sha256 }}
+          verified-promotion-head-sha: ${{ steps.image-authorization.outputs.promotion-head-sha || steps.plan-authorization.outputs.promotion-head-sha }}
+          verified-source-pr-number: ${{ steps.image-authorization.outputs.source-pr-number || steps.plan-authorization.outputs.source-pr-number }}
+          verified-source-head-sha: ${{ steps.image-authorization.outputs.source-pull-request-head-sha || steps.plan-authorization.outputs.source-pull-request-head-sha }}
+          verified-authorized-at: ${{ steps.image-authorization.outputs.solo-authorization-created-at || steps.plan-authorization.outputs.solo-authorization-created-at }}
+          verified-source-authorized-at: ${{ steps.image-authorization.outputs.solo-source-authorization-created-at || steps.plan-authorization.outputs.solo-source-authorization-created-at }}
+          verified-target-resource: ${{ steps.image-authorization.outputs.solo-target-resource || steps.plan-authorization.outputs.solo-target-resource }}
 
   promote:
     name: Promote verified artifact to staging
-    needs: verify
+    needs: [verify, consume]
     runs-on: ubuntu-latest
     environment: staging
     concurrency:
@@ -111,7 +246,7 @@ jobs:
       - name: Revalidate reviewed image evidence
         id: image-gate
         if: needs.verify.outputs.promotion_kind == 'image'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@58a4ab32b02046ce565f4426c5791a5b43f672ce
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -121,11 +256,19 @@ jobs:
           plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
           plan-root: ${{ vars.STAGING_PLAN_ROOT }}
           plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          approval-mode: ${{ needs.verify.outputs.approval_mode }}
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+          staging-ecr-registry: ${{ vars.STAGING_ECR_REGISTRY }}
 
       - name: Verify downloaded Terraform plan and KMS signature
         id: plan-gate
         if: needs.verify.outputs.promotion_kind == 'terraform'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@58a4ab32b02046ce565f4426c5791a5b43f672ce
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@50270b9e3ec0b880e7b9c7a4e7e8743dacd8f46c
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -139,6 +282,14 @@ jobs:
           plan-root: ${{ vars.STAGING_PLAN_ROOT }}
           plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
           plan-signing-public-key-der-b64: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}
+          approval-mode: ${{ needs.verify.outputs.approval_mode }}
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+          staging-ecr-registry: ${{ vars.STAGING_ECR_REGISTRY }}
 
       - name: Validate staging image writer configuration
         if: needs.verify.outputs.promotion_kind == 'image'
@@ -300,10 +451,10 @@ jobs:
               | podman login --authfile "$auth_file" --username AWS --password-stdin "$STAGING_ECR_REGISTRY"
             source_image="${DEV_ECR_REGISTRY}/${IMAGE_REPOSITORY}@${EXPECTED_DIGEST}"
             destination_image="${STAGING_ECR_REGISTRY}/${IMAGE_REPOSITORY}:${SOURCE_COMMIT}"
-            podman pull --all --authfile "$auth_file" "$source_image"
             digest_file="$RUNNER_TEMP/staging-image-digest"
-            podman push --all --authfile "$auth_file" --digestfile "$digest_file" \
-              "$source_image" "docker://${destination_image}"
+            command -v skopeo >/dev/null || { echo "::error::skopeo is required for digest-preserving image copy"; exit 1; }
+            skopeo copy --all --preserve-digests --authfile "$auth_file" --digestfile "$digest_file" \
+              "docker://${source_image}" "docker://${destination_image}"
             promoted_digest="$(cat "$digest_file")"
             [[ "$promoted_digest" == "$EXPECTED_DIGEST" ]] || { echo "::error::Staging image digest changed during copy"; exit 1; }
           fi
