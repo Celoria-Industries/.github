@@ -561,6 +561,13 @@ or add legacy/wildcard IAM trust.
 If a setup problem caused the failure, have its owner fix it through the
 reviewed setup process and repeat the acceptance checks. For expired or changed
 evidence, produce fresh artifacts and obtain a new promotion PR review.
+If the producer code changes, review its pinned action dependencies too. After
+the fix is merged, update the caller, `STAGING_TRUSTED_PLAN_WORKFLOW`, bootstrap
+`staging_plan_producer_sha`, and signer `producer_workflow_sha` to the same
+reviewed producer revision through their owning processes. Do not separately
+sign a saved-plan artifact from an earlier failed run; run the complete
+producer again with a current source authorization. Leave promotion, apply,
+and ledger trust disabled during a plan/sign-only repair.
 Rerunning a producer changes its attempt: use the new exact evidence, not an
 old approval. For a failed promotion, first inspect which steps executed;
 failure after AWS credentials or during Terraform apply may mean partial
