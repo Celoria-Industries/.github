@@ -185,6 +185,18 @@ def validate_plan_layer_pr(pr, expected_layer):
     return expected_root
 
 
+def validate_plan_check_run(check_runs, terraform_root):
+    expected_name = f"Plan {terraform_root} / Plan {terraform_root}"
+    matching = [
+        check for check in check_runs
+        if isinstance(check, dict) and check.get("name") == expected_name
+    ]
+    require(len(matching) == 1, f"Source PR lacks the exact Terraform plan check for {terraform_root}")
+    check = matching[0]
+    require(check.get("status") == "completed" and check.get("conclusion") == "success",
+            f"Terraform plan check for {terraform_root} did not succeed")
+
+
 def validate_reviewed_pr(api, repository, number, required_head=None, promotion=False, solo_source_extras=None):
     pr = api.get(f"/repos/{repository}/pulls/{number}")
     require(pr.get("state") == "closed" and pr.get("merged_at"), f"PR #{number} is not merged")
@@ -509,6 +521,7 @@ def validate_source_terraform_run(api, repository, source, trusted_workflow):
         },
     )
     validate_plan_layer_pr(source_pr, source["plan_layer"])
+    validate_plan_check_run(list_check_runs(api, repository, source_head), source["terraform_root"])
     require(source_head == source["pull_request_head_sha"],
             "Terraform source PR head changed after plan creation")
     merge_sha = validate_full_sha(source_pr.get("merge_commit_sha"), "Terraform source PR merge SHA")
@@ -627,6 +640,22 @@ def validate_plan_producer_trigger(event_name, ref):
     )
 
 
+def list_check_runs(api, repository, head_sha):
+    check_runs = []
+    for page in range(1, 101):
+        checks = api.get(
+            f"/repos/{repository}/commits/{head_sha}/check-runs"
+            f"?filter=latest&per_page=100&page={page}"
+        )
+        check_runs.extend(checks.get("check_runs", []))
+        total_count = checks.get("total_count")
+        require(type(total_count) is int and total_count >= len(check_runs),
+                "Check-run API response omitted a valid total_count")
+        if len(check_runs) >= total_count:
+            return check_runs
+    fail("Pull request has too many check runs to verify safely")
+
+
 def main():
     mode = os.environ.get("VERIFICATION_MODE", "promotion")
     if mode == "source-pr":
@@ -650,6 +679,7 @@ def main():
             solo_source_extras={"plan_layer": plan_layer, "terraform_root": terraform_root},
         )
         validate_plan_layer_pr(source_pr, plan_layer)
+        validate_plan_check_run(list_check_runs(api, repository, head_sha), terraform_root)
         merge_sha = validate_full_sha(source_pr.get("merge_commit_sha"), f"PR #{pr_number} merge SHA")
         write_outputs({
             "source_pr_number": pr_number,

@@ -148,10 +148,18 @@ The staging gate contract is:
 | Workflow | Caller inputs | Reusable-workflow outputs |
 |---|---|---|
 | `staging-promotion-gate.yml` | `promotion-pr-number` (`number`, required); `source-authorization-comment-id` and `promotion-authorization-comment-id` (`string`, solo only) | `promotion-kind`, `source-commit`, `promoted-digest` (image only), `producer-run-id`, `plan-artifact-id`, `evidence-artifact-id` (Terraform only) |
-| `staging-terraform-plan.yml` | `source-pr-number` (`number`, required); `source-authorization-comment-id` (`string`, solo only) | `plan-artifact-id`, `plan-artifact-digest`, `evidence-artifact-id`, `evidence-artifact-digest` |
+| `staging-terraform-plan.yml` | `source-pr-number` (`number`, required); `plan-layer` (`string`, one of `foundation`, `nervous-system`, `service-bootstrap`, required); `source-authorization-comment-id` (`string`, solo only) | `plan-artifact-id`, `plan-artifact-digest`, `evidence-artifact-id`, `evidence-artifact-digest`, `plan-layer`, `terraform-root` |
 
 No reusable-workflow input selects a role, signing key, target account,
-Terraform root, command, or artifact.
+Terraform root path, command, or artifact. The layer enum maps in trusted
+central code to exactly one path under
+`stacks/celoria-industries/staging/`; the source PR must carry exactly one
+matching `staging-plan:<layer>` label. Missing, duplicate, or unknown layer
+labels fail closed. The gate also requires the successful source-PR check run
+named `Plan <root> / Plan <root>` for that exact mapped root and exact PR head;
+this makes the central saved plan selection agree with the IaC PR-CI selector.
+The existing IaC pull-request planning behavior is owned by that repository
+and is not changed here.
 
 ## Experimental solo authorization
 
@@ -168,14 +176,14 @@ The raw comment body must be an exact JSON object, without extra or duplicate
 keys. After inspecting the source PR, the operator posts this on that PR:
 
 ```json
-{"schema_version":1,"type":"source","repository_id":123,"pull_request":41,"head_sha":"<source PR head SHA>","target":"staging","account_id":"<staging account ID>","region":"<staging region>"}
+{"schema_version":1,"type":"source","repository_id":123,"pull_request":41,"head_sha":"<source PR head SHA>","target":"staging","account_id":"<staging account ID>","region":"<staging region>","plan_layer":"foundation","terraform_root":"stacks/celoria-industries/staging/foundation"}
 ```
 
 After the image or plan evidence exists, the operator inspects it and posts
 this separate comment on the promotion PR:
 
 ```json
-{"schema_version":1,"type":"promotion","repository_id":123,"pull_request":42,"head_sha":"<promotion PR head SHA>","target":"staging","account_id":"<staging account ID>","region":"<staging region>","manifest_sha256":"sha256:<SHA-256 of exact manifest bytes>","target_resource":"<staging ECR registry/repository or Terraform root>"}
+{"schema_version":1,"type":"promotion","repository_id":123,"pull_request":42,"head_sha":"<promotion PR head SHA>","target":"staging","account_id":"<staging account ID>","region":"<staging region>","manifest_sha256":"sha256:<SHA-256 of exact manifest bytes>","target_resource":"<staging ECR registry/repository or Terraform root>","plan_layer":"foundation"}
 ```
 
 Numbers above are examples, not customer values. The hash binds every manifest
@@ -184,6 +192,10 @@ producer run and attempt. The target resource and account/region are checked
 separately against configured staging values. The source and promotion PRs
 must still be merged to main with successful checks. Pass each comment's
 numeric ID using the workflow inputs; a comment ID is not a permission grant.
+For image authorization, omit `plan_layer` from the promotion comment. For a
+Terraform source authorization, include the selected `plan_layer` and its exact
+mapped `terraform_root`; Terraform promotion authorization includes the same
+layer and root as `target_resource`.
 
 The verifier checks GitHub's issue-comment ID, issue URL, user ID and type,
 body, creation time, update time and GitHub App attribution. It rejects
@@ -300,7 +312,7 @@ a safe executable-code boundary:
    to `kms:Sign` on that immutable key ARN; it has no state, deployment, or
    apply permissions. The private key never leaves KMS.
 3. The evidence record binds the source repository, PR number/head/merge
-   commit, target account/region/root, plan artifact ID/name/digest and binary
+   commit, target account/region, allowlisted layer and its exact root, plan artifact ID/name/digest and binary
    SHA-256, producer workflow ref/run/attempt/head SHA, and immutable KMS key
    ARN. It uses RSA-PSS/SHA-256. The evidence artifact is separate from the
    plan artifact, avoiding an artifact-ID self-reference.
@@ -342,7 +354,8 @@ Terraform promotion manifest schema (exact keys; no additional properties):
     "evidence_artifact_digest": "sha256:<64 lowercase hex characters>",
     "target_account_id": "<12-digit staging account ID>",
     "target_region": "<staging region>",
-    "terraform_root": "stacks/<company>/staging/<root>",
+    "plan_layer": "foundation",
+    "terraform_root": "stacks/celoria-industries/staging/foundation",
     "signing_key_arn": "arn:aws:kms:<region>:<bootstrap-account>:key/<immutable-key-id>",
     "signing_algorithm": "RSASSA_PSS_SHA_256"
   }
@@ -409,15 +422,16 @@ A candidate implemented in the disabled prototype is
 [`skopeo copy --all --preserve-digests`](https://github.com/containers/skopeo/blob/main/docs/skopeo-copy.1.md),
 which documents copying the full image list and failing if a digest cannot be
 preserved. The runner must have `skopeo`; the step fails if it is missing.
-This replacement has not been validated with a real transfer.
-Test against real isolated OCI-compatible source and destination registries,
-using a multi-platform fixture with distinct platform manifests and blobs.
-Compare source and destination raw index digest, every child manifest digest,
-and blob availability; test single-platform images, authentication failures,
-missing blobs, a conflicting immutable destination tag, and a destination
-that cannot preserve the digest. Repeat with the actual ECR account/region,
-media types and least-privilege policies before rollout. Mocked commands or
-asserting workflow text alone cannot establish transfer integrity.
+The exact command passed a real local transfer between two disposable
+OCI-compatible registries, using a pinned multi-platform Alpine index: source
+and destination had identical raw index bytes/digest, all 16 descriptors and
+all child manifest/config/layer digests verified, across 8 platforms. A
+no-credential integration test repeats this in PR CI using disposable
+registries. This establishes that Skopeo preserved this fixture between local
+registry instances, not compatibility with Amazon ECR. Still test ECR media
+types, authentication, missing blobs and conflicting immutable destination
+tags against the real accounts and least-privilege policies before rollout.
+No AWS/ECR credentials were used in the local test.
 
 ## Environment configuration and OIDC
 
@@ -428,9 +442,9 @@ target value comes from a workflow caller.
 
 | Environment | Required variables |
 |---|---|
-| `staging-plan` | `AWS_ROLE_ARN_STAGING_PLAN`, `AWS_DEPLOY_ROLE_ARN_STAGING_PLAN`, `TF_STATE_BUCKET_STAGING`, `AWS_REGION`, `STAGING_PLAN_TARGET_ACCOUNT_ID`, `STAGING_PLAN_TARGET_REGION`, `STAGING_PLAN_ROOT` |
-| `staging-plan-signing` | `AWS_ROLE_ARN_STAGING_SIGNER`, `AWS_REGION`, `STAGING_PLAN_TARGET_ACCOUNT_ID`, `STAGING_PLAN_TARGET_REGION`, `STAGING_PLAN_ROOT`, `STAGING_PLAN_SIGNING_KEY_ARN`, `STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64` |
-| `staging` | `AWS_ROLE_ARN_STAGING_APPLY`, `AWS_DEPLOY_ROLE_ARN_STAGING_APPLY`, `TF_STATE_BUCKET_STAGING`, `AWS_REGION`, `STAGING_PLAN_TARGET_ACCOUNT_ID`, `STAGING_PLAN_TARGET_REGION`, `STAGING_PLAN_ROOT`, `STAGING_PLAN_SIGNING_KEY_ARN`, `STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64` |
+| `staging-plan` | `AWS_ROLE_ARN_STAGING_PLAN`, `AWS_DEPLOY_ROLE_ARN_STAGING_PLAN`, `TF_STATE_BUCKET_STAGING`, `AWS_REGION`, `STAGING_PLAN_TARGET_ACCOUNT_ID`, `STAGING_PLAN_TARGET_REGION` |
+| `staging-plan-signing` | `AWS_ROLE_ARN_STAGING_SIGNER`, `AWS_REGION`, `STAGING_PLAN_TARGET_ACCOUNT_ID`, `STAGING_PLAN_TARGET_REGION`, `STAGING_PLAN_SIGNING_KEY_ARN`, `STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64` |
+| `staging` | `AWS_ROLE_ARN_STAGING_APPLY`, `AWS_DEPLOY_ROLE_ARN_STAGING_APPLY`, `TF_STATE_BUCKET_STAGING`, `AWS_REGION`, `STAGING_PLAN_TARGET_ACCOUNT_ID`, `STAGING_PLAN_TARGET_REGION`, `STAGING_PLAN_SIGNING_KEY_ARN`, `STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64` |
 
 `AWS_REGION` is required: configure it to the bootstrap state bucket's region
 for planning and apply, and to the signing key's region for signing. The

@@ -23,6 +23,7 @@ from verify_promotion import (  # noqa: E402
     validate_terraform_manifest,
     validate_supported_kind,
     validate_plan_layer_pr,
+    validate_plan_check_run,
     terraform_root_for_layer,
 )
 
@@ -208,6 +209,25 @@ class StagingPromotionGateTest(unittest.TestCase):
         ):
             with self.subTest(layer=layer, labels=labels), self.assertRaises(GateError):
                 validate_plan_layer_pr({"labels": labels}, layer)
+
+    def test_selected_layer_requires_its_exact_successful_ci_plan_check(self):
+        root = "stacks/celoria-industries/staging/foundation"
+        expected = f"Plan {root} / Plan {root}"
+        validate_plan_check_run(
+            [{"name": expected, "status": "completed", "conclusion": "success"}],
+            root,
+        )
+        for checks in (
+            [],
+            [{"name": expected, "status": "completed", "conclusion": "failure"}],
+            [{"name": f"Plan {root} / Plan other", "status": "completed", "conclusion": "success"}],
+            [
+                {"name": expected, "status": "completed", "conclusion": "success"},
+                {"name": expected, "status": "completed", "conclusion": "success"},
+            ],
+        ):
+            with self.subTest(checks=checks), self.assertRaises(GateError):
+                validate_plan_check_run(checks, root)
 
     def test_staging_region_must_be_explicit_before_credentials(self):
         for workflow, step_name, env in (
