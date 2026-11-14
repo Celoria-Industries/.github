@@ -568,6 +568,13 @@ reviewed producer revision through their owning processes. Do not separately
 sign a saved-plan artifact from an earlier failed run; run the complete
 producer again with a current source authorization. Leave promotion, apply,
 and ledger trust disabled during a plan/sign-only repair.
+The producer normalizes each upload action's bare 64-character lowercase
+SHA-256 output to `sha256:<hash>` immediately after upload, before job outputs,
+evidence, or manifests use it. REST artifact digests must match that canonical
+value exactly; normalization is not a substitute for the API digest comparison.
+The pinned download action extracts a single artifact directly into the
+requested destination, so the signer reads `staging-plan-artifacts/tfplan`,
+not an extra artifact-name subdirectory.
 Rerunning a producer changes its attempt: use the new exact evidence, not an
 old approval. For a failed promotion, first inspect which steps executed;
 failure after AWS credentials or during Terraform apply may mean partial

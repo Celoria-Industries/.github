@@ -22,6 +22,7 @@ from plan_evidence import (  # noqa: E402
     verify_plan_evidence,
 )
 from verify_promotion import GitHubApi  # noqa: E402
+from verify_promotion import GateError, validate_terraform_manifest  # noqa: E402
 
 
 WORKFLOW_SHA = "1" * 40
@@ -29,6 +30,19 @@ COMMIT = "3" * 40
 MERGE_SHA = COMMIT
 RUN_HEAD_SHA = "4" * 40
 PLAN_DIGEST = "sha256:" + "5" * 64
+PROVIDER_UPLOAD_DIGEST = "d0579dc3ec01103aaa2d07cd397e7c332802ef520ea1bc24883671c765af3720"
+PLAN_WORKFLOW = (ROOT / ".github/workflows/staging-terraform-plan.yml").read_text()
+
+
+def producer_step_script(name):
+    step = PLAN_WORKFLOW.split(f"      - name: {name}\n", 1)[1].split("\n      - name:", 1)[0]
+    script = step.split("        run: |\n", 1)[1]
+    lines = []
+    for line in script.splitlines():
+        if line and not line.startswith("          "):
+            break
+        lines.append(line[10:])
+    return "\n".join(lines)
 
 
 def evidence_record():
@@ -145,11 +159,94 @@ class CreatePlanEvidenceTest(unittest.TestCase):
         self.assertEqual(strict_record((self.output / "evidence.json").read_bytes()), self.record)
 
     def test_entrypoint_rejects_artifact_digest_substitution_before_output(self):
+        result, output = self.normalize_upload("Normalize saved-plan upload digest", PROVIDER_UPLOAD_DIGEST)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.environment["PLAN_ARTIFACT_DIGEST"] = output.removeprefix("digest=").strip()
         self.artifact["digest"] = "sha256:" + "9" * 64
         with self.assertRaises(SystemExit) as result:
             self.run_entrypoint()
         self.assertEqual(result.exception.code, 1)
         self.assertFalse(self.output.exists())
+
+    def normalize_upload(self, step, digest):
+        output = Path(self.tempdir.name) / "step-output"
+        output.write_text("")
+        result = subprocess.run(
+            ["bash", "-c", producer_step_script(step)],
+            env={**os.environ, "UPLOAD_DIGEST": digest, "GITHUB_OUTPUT": str(output)},
+            capture_output=True, text=True,
+        )
+        return result, output.read_text()
+
+    def test_native_upload_digest_flows_through_evidence_outputs_and_manifest(self):
+        result, output = self.normalize_upload("Normalize saved-plan upload digest", PROVIDER_UPLOAD_DIGEST)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        digest = output.removeprefix("digest=").strip()
+        self.assertEqual(digest, "sha256:" + PROVIDER_UPLOAD_DIGEST)
+        self.environment["PLAN_ARTIFACT_DIGEST"] = digest
+        self.artifact["digest"] = digest
+        self.record["plan_artifact_digest"] = digest
+        self.run_entrypoint()
+        evidence = strict_record((self.output / "evidence.json").read_bytes())
+        self.assertEqual(evidence, self.record)
+
+        evidence_upload_digest = hashlib.sha256(b"synthetic evidence archive").hexdigest()
+        result, output = self.normalize_upload("Normalize signed-evidence upload digest", evidence_upload_digest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence_digest = output.removeprefix("digest=").strip()
+        directory = Path(self.tempdir.name)
+        downloaded = directory / "staging-plan-artifacts"
+        downloaded.mkdir()
+        (downloaded / "tfplan").write_bytes(Path(self.environment["PLAN_ARTIFACT_PATH"]).read_bytes())
+        summary = directory / "summary"
+        result = subprocess.run(
+            ["bash", "-c", producer_step_script("Publish promotion-manifest source fields")],
+            env={
+                **os.environ, **self.environment,
+                "RUNNER_TEMP": str(directory), "GITHUB_STEP_SUMMARY": str(summary),
+                "PLAN_ARTIFACT_DIGEST": digest, "EVIDENCE_ARTIFACT_ID": "103",
+                "EVIDENCE_ARTIFACT_DIGEST": evidence_digest,
+                "TARGET_ACCOUNT_ID": evidence["target_account_id"],
+                "TARGET_REGION": evidence["target_region"], "TERRAFORM_ROOT": evidence["terraform_root"],
+                "PLAN_LAYER": evidence["plan_layer"], "SIGNING_KEY_ARN": evidence["signing_key_arn"],
+                "TRUSTED_PLAN_WORKFLOW": evidence["producer_workflow_ref"],
+            },
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads((directory / "staging-promotion-manifest.json").read_bytes())
+        source = validate_terraform_manifest(
+            manifest, evidence["source_repository"], evidence["producer_workflow_ref"],
+            {key: evidence[key] for key in ("target_account_id", "target_region", "signing_key_arn")},
+        )
+        self.assertEqual(source["plan_artifact_digest"], evidence["plan_artifact_digest"])
+        self.assertEqual(source["plan_sha256"], evidence["plan_sha256"])
+        self.assertEqual(source["evidence_artifact_digest"], "sha256:" + evidence_upload_digest)
+        self.assertEqual(source["terraform_root"], evidence["terraform_root"])
+        for field in ("plan_artifact_digest", "evidence_artifact_digest"):
+            with self.subTest(field=field):
+                source[field] = source[field].removeprefix("sha256:")
+                with self.assertRaises(GateError):
+                    validate_terraform_manifest(
+                        manifest, evidence["source_repository"], evidence["producer_workflow_ref"], {}
+                    )
+                source[field] = "sha256:" + source[field]
+        self.assertIn("plan_artifact_digest: ${{ steps.normalize-plan.outputs.digest }}", PLAN_WORKFLOW)
+        self.assertIn("evidence_artifact_digest: ${{ steps.normalize-evidence.outputs.digest }}", PLAN_WORKFLOW)
+        self.assertIn("value: ${{ jobs.plan.outputs.plan_artifact_digest }}", PLAN_WORKFLOW)
+        self.assertIn("value: ${{ jobs.sign.outputs.evidence_artifact_digest }}", PLAN_WORKFLOW)
+        self.assertIn("plan-artifact-digest: ${{ needs.plan.outputs.plan_artifact_digest }}", PLAN_WORKFLOW)
+        self.assertIn("EVIDENCE_ARTIFACT_DIGEST: ${{ steps.normalize-evidence.outputs.digest }}", PLAN_WORKFLOW)
+        self.assertIn("plan-artifact-path: ${{ runner.temp }}/staging-plan-artifacts/tfplan", PLAN_WORKFLOW)
+
+    def test_upload_boundaries_reject_malformed_or_already_prefixed_digests(self):
+        for step in ("Normalize saved-plan upload digest", "Normalize signed-evidence upload digest"):
+            for value in ("", "a" * 63, "a" * 65, "G" * 64, PROVIDER_UPLOAD_DIGEST.upper(),
+                          "sha256:" + PROVIDER_UPLOAD_DIGEST, PROVIDER_UPLOAD_DIGEST + "\ninjected=1"):
+                with self.subTest(step=step, value=value):
+                    result, output = self.normalize_upload(step, value)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(output, "")
 
 
 class StagingPlanEvidenceTest(unittest.TestCase):

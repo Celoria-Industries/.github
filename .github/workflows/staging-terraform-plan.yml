@@ -84,7 +84,7 @@ jobs:
       pull-requests: read
     outputs:
       plan_artifact_id: ${{ steps.upload-plan.outputs.artifact-id }}
-      plan_artifact_digest: ${{ steps.upload-plan.outputs.artifact-digest }}
+      plan_artifact_digest: ${{ steps.normalize-plan.outputs.digest }}
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       STATE_ROLE_ARN: ${{ vars.AWS_ROLE_ARN_STAGING_PLAN }}
@@ -200,6 +200,16 @@ jobs:
           compression-level: 0
           overwrite: false
 
+      - name: Normalize saved-plan upload digest
+        id: normalize-plan
+        env:
+          UPLOAD_DIGEST: ${{ steps.upload-plan.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$UPLOAD_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Upload artifact digest must be 64 lowercase hexadecimal characters"; exit 1; }
+          printf 'digest=sha256:%s\n' "$UPLOAD_DIGEST" >> "$GITHUB_OUTPUT"
+
   sign:
     name: Sign canonical plan evidence
     needs: [validate-source, plan]
@@ -213,7 +223,7 @@ jobs:
       pull-requests: read
     outputs:
       evidence_artifact_id: ${{ steps.upload-evidence.outputs.artifact-id }}
-      evidence_artifact_digest: ${{ steps.upload-evidence.outputs.artifact-digest }}
+      evidence_artifact_digest: ${{ steps.normalize-evidence.outputs.digest }}
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       SIGNER_ROLE_ARN: ${{ vars.AWS_ROLE_ARN_STAGING_SIGNER }}
@@ -244,7 +254,7 @@ jobs:
           source-pull-request-merge-sha: ${{ needs.validate-source.outputs.source_pr_merge_sha }}
           plan-artifact-id: ${{ needs.plan.outputs.plan_artifact_id }}
           plan-artifact-digest: ${{ needs.plan.outputs.plan_artifact_digest }}
-          plan-artifact-path: ${{ runner.temp }}/staging-plan-artifacts/staging-terraform-plan/tfplan
+          plan-artifact-path: ${{ runner.temp }}/staging-plan-artifacts/tfplan
           evidence-output-directory: ${{ runner.temp }}/staging-plan-evidence
           trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
           plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
@@ -321,12 +331,22 @@ jobs:
           compression-level: 0
           overwrite: false
 
+      - name: Normalize signed-evidence upload digest
+        id: normalize-evidence
+        env:
+          UPLOAD_DIGEST: ${{ steps.upload-evidence.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$UPLOAD_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Upload artifact digest must be 64 lowercase hexadecimal characters"; exit 1; }
+          printf 'digest=sha256:%s\n' "$UPLOAD_DIGEST" >> "$GITHUB_OUTPUT"
+
       - name: Publish promotion-manifest source fields
         env:
           PLAN_ARTIFACT_ID: ${{ needs.plan.outputs.plan_artifact_id }}
           PLAN_ARTIFACT_DIGEST: ${{ needs.plan.outputs.plan_artifact_digest }}
           EVIDENCE_ARTIFACT_ID: ${{ steps.upload-evidence.outputs.artifact-id }}
-          EVIDENCE_ARTIFACT_DIGEST: ${{ steps.upload-evidence.outputs.artifact-digest }}
+          EVIDENCE_ARTIFACT_DIGEST: ${{ steps.normalize-evidence.outputs.digest }}
           SOURCE_PR_NUMBER: ${{ needs.validate-source.outputs.source_pr_number }}
           SOURCE_PR_HEAD_SHA: ${{ needs.validate-source.outputs.source_pr_head_sha }}
           SOURCE_PR_MERGE_SHA: ${{ needs.validate-source.outputs.source_pr_merge_sha }}
@@ -347,7 +367,7 @@ jobs:
             --arg workflow_head "$GITHUB_SHA" \
             --arg workflow "$TRUSTED_PLAN_WORKFLOW" \
             --arg plan_digest "$PLAN_ARTIFACT_DIGEST" \
-            --arg plan_sha "$(sha256sum "$RUNNER_TEMP/staging-plan-artifacts/staging-terraform-plan/tfplan" | cut -d' ' -f1)" \
+            --arg plan_sha "$(sha256sum "$RUNNER_TEMP/staging-plan-artifacts/tfplan" | cut -d' ' -f1)" \
             --arg evidence_digest "$EVIDENCE_ARTIFACT_DIGEST" \
             --arg account "$TARGET_ACCOUNT_ID" \
             --arg region "$TARGET_REGION" \
