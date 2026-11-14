@@ -2,6 +2,7 @@ import unittest
 import subprocess
 import os
 import tempfile
+import re
 
 from pathlib import Path
 import sys
@@ -86,6 +87,27 @@ class FakeApi:
 
 
 class StagingPromotionGateTest(unittest.TestCase):
+    def test_gate_calling_jobs_explicitly_grant_required_read_permissions(self):
+        checked_jobs = []
+        for workflow in (PLAN_WORKFLOW, STAGING_WORKFLOW):
+            jobs = re.split(r"(?m)^  ([a-z][a-z-]*):\n", workflow.split("\njobs:\n", 1)[1])
+            for job, body in zip(jobs[1::2], jobs[2::2]):
+                if "uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@" not in body:
+                    continue
+                checked_jobs.append(job)
+                with self.subTest(workflow=workflow.splitlines()[0], job=job):
+                    header = body.split("    steps:\n", 1)[0]
+                    permissions = re.search(
+                        r"(?m)^    permissions:\n((?:      [a-z-]+: [a-z]+\n)+)", header
+                    )
+                    self.assertIsNotNone(permissions, "Gate jobs must declare their own token permissions")
+                    grants = dict(re.findall(r"      ([a-z-]+): ([a-z]+)", permissions[1]))
+                    for scope in ("actions", "checks", "contents", "pull-requests"):
+                        self.assertEqual(grants.get(scope), "read", f"{job} needs {scope}: read")
+                    if job == "validate-source":
+                        self.assertEqual(set(grants), {"actions", "checks", "contents", "pull-requests"})
+        self.assertEqual(checked_jobs, ["validate-source", "sign", "verify", "consume", "promote"])
+
     def test_promotion_fails_before_credential_job(self):
         for job, guard in (
             ("verify", "Stop disabled staging promotion"),

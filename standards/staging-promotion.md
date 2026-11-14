@@ -168,6 +168,10 @@ Only suites independently identified as superseded same-head runs of that
 exact workflow are excluded. Other workflow/app check failures remain
 blocking, and generic image/promotion-PR check validation is unchanged.
 This makes the central saved plan selection agree with the IaC PR-CI selector.
+Every job invoking source/evidence verification explicitly grants
+`actions: read` alongside Checks, Contents and Pull Requests read access. Caller grants
+do not restore scopes omitted from a callee job's explicit permissions map.
+The source-validation job has no write or OIDC token permission.
 The existing IaC pull-request planning behavior is owned by that repository
 and is not changed here.
 

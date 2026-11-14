@@ -45,6 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging-plan
     permissions:
+      actions: read
       checks: read
       contents: read
       pull-requests: read
