@@ -10,7 +10,7 @@ inputs:
     required: false
     default: ""
   verification-mode:
-    description: Verification operation, either promotion or source-pr
+    description: Verification operation, promotion, source-pr, terraform-metadata, or terraform-verification
     required: false
     default: promotion
   source-pr-number:
@@ -150,6 +150,9 @@ inputs:
     required: false
     default: ""
 outputs:
+  verification-result:
+    description: Verified only after mandatory local Terraform plan and signature acceptance; not deployment approval
+    value: ${{ steps.verify.outputs.verification_result }}
   promotion-kind:
     description: Verified promotion operation
     value: ${{ steps.verify.outputs.promotion_kind }}

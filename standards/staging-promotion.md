@@ -2,12 +2,89 @@
 
 This runbook describes a proposed shared GitHub workflow contract for
 promoting reviewed container images and Terraform plans to staging.
-**Both staging promotion paths are disabled in code:** the verification job
+**Both staging deployment paths are disabled in code:** the promotion verification job
 fails unconditionally before credentials, and the dependent writer job has
 its own unconditional stop before credential configuration. No variable or
 caller input enables them. Keep staging writer trust disabled. Removing the
 guards requires a separately reviewed fix for the blockers below and real
 acceptance evidence; bootstrap alone is not activation.
+
+## Read-only Terraform verification acceptance
+
+The separate reusable workflow
+`.github/workflows/staging-terraform-verification.yml` accepts the exact
+reviewed Terraform promotion evidence **without enabling deployment**. It has
+one job in the main-only `staging` environment, with only `actions: read`,
+`checks: read`, `contents: read` and `pull-requests: read`. It has no OIDC
+permission, AWS action, checkout, Terraform execution, ledger consumption,
+writer job or dependency on the disabled deployment workflow. The existing
+promotion workflow and its unconditional stops remain unchanged.
+
+The verifier first checks current PR authorization and metadata, then
+downloads each exact artifact ID from the bound repository/run into separate
+plan/evidence directories with digest mismatches fatal. It rechecks the exact
+manifest hash, current source/promotion approval, source head/layer/CI,
+producer workflow/run/attempt/head and artifact identities after downloading.
+Success requires all three local files: saved plan, canonical evidence JSON
+and RSA-PSS signature. The public key, immutable KMS key ARN, target account
+and region come from trusted configuration, never the manifest alone.
+`verification-result: verified` is emitted only after signature and plan-byte
+verification; metadata success cannot emit it.
+
+This is repeatable read-only acceptance, **not single-use authorization**:
+it does not consume the solo ledger, reserve a deployment or authorize a
+later writer to skip verification. A future deployment still needs its own
+fresh authorization/revalidation and atomic consumption. Independent review
+remains the default; solo mode retains its documented loss of independent
+oversight and comment-token limitations.
+
+### Operator sequence
+
+The Celoria producer has a successful
+[signed foundation plan run](https://github.com/Celoria-Industries/infrastructure-as-code/actions/runs/43540216397).
+That establishes producer acceptance, not promotion verification or apply
+acceptance. Keep the accepted producer pinned to
+`b3a4aab3d50767e281c37be0479ab25127961af8` in its caller, trusted producer
+setting, and planner/signer IAM trust. Advancing this separate verifier does
+not require changing those producer pins or any AWS trust.
+
+1. Review and merge the central verification change, then have the IaC owner
+   add/update a **verification-only** main caller pinned to the actual merged
+   `staging-terraform-verification.yml` SHA. Do not route it to the old
+   deployment workflow. Its job grants exactly the four read scopes above;
+   no `id-token: write` or secrets are needed. Retain the main-only environment
+   policy and independently pinned public DER key/configuration.
+2. Obtain the producer-generated promotion manifest source fields from the
+   successful run's Actions summary (not reconstructed or guessed plan
+   hashes). Create and merge a separate PR changing only
+   `.github/staging-promotion.json`, using the exact schema below. Review the
+   actual infrastructure changes in the private owning repository; do not
+   publish plan/state contents.
+3. Ensure source and promotion PR heads have current independent human
+   approvals, or, in configured solo mode, have the human create unedited
+   source and later promotion authorization comments using the schemas below.
+   The source comment binds layer/root; the promotion comment binds the hash
+   of the exact manifest bytes plus target root/layer. Both must remain within
+   the configured expiry through the final recheck. An expired comment needs
+   a new human comment/ID; the workflow never refreshes authorization.
+4. Human-invoke the reviewed main verification caller with
+   `promotion-pr-number` (`number`) and, in solo mode,
+   `source-authorization-comment-id` and
+   `promotion-authorization-comment-id` (`string`). The known dispatch
+   numeric boundary requires the caller's explicit conversion:
+   `promotion-pr-number: ${{ fromJSON(inputs.promotion-pr-number) }}`.
+   No input selects a role, key, account, artifact, root or command.
+5. Record the Actions run/attempt, `verification-result: verified`,
+   `manifest-sha256` (bare hex), `promotion-head-sha`, `source-commit`,
+   `producer-run-id`, both artifact IDs, `plan-layer` and `terraform-root`.
+   A failed download, expired artifact/authorization, wrong key, signature
+   failure, altered plan or changed binding is a failed acceptance, not
+   permission to remove checks. No ledger/write activation follows this run.
+
+This source change performs no dispatch or artifact download outside Actions.
+The first successful execution of this new workflow against real signed
+artifacts is still an operator acceptance prerequisite; local crypto fixtures
+and CI checks are not a claim that this live step has happened.
 
 ## Start here: you are setting up a customer's environment
 
@@ -137,7 +214,8 @@ in the apply environment. IAM trust must prevent callers from bypassing the
 gate; that trust is not established by this workflow alone.
 
 Both caller workflows need only `actions: read`, `checks: read`,
-`contents: read`, `pull-requests: read`, and `id-token: write`. The plan
+`contents: read`, `pull-requests: read`, and `id-token: write`. The separate
+verification-only caller needs only the four read scopes, never OIDC. The plan
 producer uses the runtime artifact service for uploads; it does not request
 repository `actions: write`. The reusable jobs narrow permissions further by
 job; callers must grant the required permissions because reusable workflows

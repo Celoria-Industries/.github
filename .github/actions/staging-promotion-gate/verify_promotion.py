@@ -715,6 +715,8 @@ def verify_local_terraform_artifacts(source, expected):
             signature = signature_file.read().strip()
     except (OSError, UnicodeDecodeError) as error:
         raise GateError(f"Terraform evidence artifact could not be read: {error}") from error
+    except EvidenceError as error:
+        raise GateError(str(error)) from error
     record_expected = dict(expected)
     record_expected.update({
         "source_repository": source["repository"],
@@ -818,12 +820,21 @@ def main():
         })
         print(f"Verified reviewed source PR #{pr_number} at merge commit {merge_sha}")
         return
-    require(mode == "promotion", "Unsupported promotion gate verification mode")
+    terraform_verification = mode in ("terraform-metadata", "terraform-verification")
+    require(mode == "promotion" or terraform_verification, "Unsupported promotion gate verification mode")
+    if mode == "terraform-verification":
+        require(all(os.environ.get(key) for key in (
+            "PLAN_ARTIFACT_PATH", "EVIDENCE_RECORD_PATH", "EVIDENCE_SIGNATURE_PATH",
+            "EXPECTED_MANIFEST_SHA",
+        )), "Terraform verification requires downloaded plan, evidence, signature and prior manifest SHA")
     validate_promotion_trigger(
         os.environ.get("GITHUB_EVENT_NAME", ""),
         os.environ.get("GITHUB_REF", ""),
     )
     repository = validate_repo(os.environ.get("GITHUB_REPOSITORY"), "GITHUB_REPOSITORY")
+    if terraform_verification:
+        require(repository == PLAN_REPOSITORY,
+                "Terraform verification is restricted to the infrastructure repository")
     pr_number = parse_positive_int(os.environ.get("PROMOTION_PR_NUMBER"), "promotion-pr-number")
     expected_manifest_sha = os.environ.get("EXPECTED_MANIFEST_SHA", "")
     api = GitHubApi()
@@ -841,6 +852,8 @@ def main():
             "Promotion manifest changed after the initial verification")
     manifest = strict_json(manifest_bytes, MANIFEST_PATH)
     kind = manifest.get("kind") if isinstance(manifest, dict) else None
+    if terraform_verification:
+        require(kind == "terraform", "Verification-only acceptance supports Terraform manifests only")
     validate_supported_kind(kind)
     solo_created = ""
     target_resource = ""
@@ -908,15 +921,25 @@ def main():
     outputs["source_pull_request_head_sha"] = source_pr["head"]["sha"]
     outputs["solo_authorization_created_at"] = solo_created
     outputs["solo_target_resource"] = target_resource
+    source_extras = (
+        {"plan_layer": source["plan_layer"], "terraform_root": source["terraform_root"]}
+        if kind == "terraform" else None
+    )
     outputs["solo_source_authorization_created_at"] = (
-        verify_solo_pr(api, repository, source_pr["number"], source_pr["head"]["sha"], "source")
+        verify_solo_pr(api, repository, source_pr["number"], source_pr["head"]["sha"], "source", source_extras)
         if approval_mode() == "solo" else ""
     )
     if approval_mode() == "solo":
         require(outputs["solo_source_authorization_created_at"] <= solo_created,
                 "Promotion authorization must not predate source authorization")
+    if mode == "terraform-verification":
+        outputs["verification_result"] = "verified"
     write_outputs(outputs)
-    print(f"Verified {kind} staging promotion in PR #{pr_number} at {head_sha}")
+    if terraform_verification:
+        scope = "signed plan and bytes" if mode == "terraform-verification" else "metadata only"
+        print(f"Verified Terraform {scope} in PR #{pr_number} at {head_sha}; no consumption or deployment")
+    else:
+        print(f"Verified {kind} staging promotion in PR #{pr_number} at {head_sha}")
 
 
 if __name__ == "__main__":
