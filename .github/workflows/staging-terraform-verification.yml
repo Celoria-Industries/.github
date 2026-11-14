@@ -1,0 +1,132 @@
+name: Staging Terraform verification only
+
+on:
+  workflow_call:
+    inputs:
+      promotion-pr-number:
+        description: Merged PR containing only the exact staging Terraform promotion manifest
+        required: true
+        type: number
+      source-authorization-comment-id:
+        description: Current source PR authorization comment ID in solo mode
+        required: false
+        type: string
+        default: ""
+      promotion-authorization-comment-id:
+        description: Current promotion PR authorization comment ID in solo mode
+        required: false
+        type: string
+        default: ""
+    outputs:
+      verification-result:
+        description: Verified means read-only acceptance, never consumption or deployment authorization
+        value: ${{ jobs.verify.outputs.verification_result }}
+      manifest-sha256:
+        description: SHA-256 of exact reviewed manifest bytes, without algorithm prefix
+        value: ${{ jobs.verify.outputs.manifest_sha256 }}
+      promotion-head-sha:
+        description: Verified promotion PR head
+        value: ${{ jobs.verify.outputs.promotion_head_sha }}
+      source-commit:
+        description: Verified source merge commit
+        value: ${{ jobs.verify.outputs.source_commit }}
+      producer-run-id:
+        description: Verified signed plan producer run
+        value: ${{ jobs.verify.outputs.producer_run_id }}
+      plan-artifact-id:
+        description: Verified saved-plan artifact ID
+        value: ${{ jobs.verify.outputs.plan_artifact_id }}
+      evidence-artifact-id:
+        description: Verified signed-evidence artifact ID
+        value: ${{ jobs.verify.outputs.evidence_artifact_id }}
+      plan-layer:
+        description: Verified staging layer enum
+        value: ${{ jobs.verify.outputs.plan_layer }}
+      terraform-root:
+        description: Verified exact staging root
+        value: ${{ jobs.verify.outputs.terraform_root }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify signed Terraform plan without deployment
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      verification_result: ${{ steps.accept.outputs.verification-result }}
+      manifest_sha256: ${{ steps.accept.outputs.manifest-sha256 }}
+      promotion_head_sha: ${{ steps.accept.outputs.promotion-head-sha }}
+      source_commit: ${{ steps.accept.outputs.source-commit }}
+      producer_run_id: ${{ steps.accept.outputs.producer-run-id }}
+      plan_artifact_id: ${{ steps.accept.outputs.plan-artifact-id }}
+      evidence_artifact_id: ${{ steps.accept.outputs.evidence-artifact-id }}
+      plan_layer: ${{ steps.accept.outputs.plan-layer }}
+      terraform_root: ${{ steps.accept.outputs.terraform-root }}
+    steps:
+      - name: Validate exact Terraform promotion metadata and authorizations
+        id: metadata
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@1ab81ad685bde7c4c9d0d1b288decc92a5cd3820
+        with:
+          verification-mode: terraform-metadata
+          promotion-pr-number: ${{ inputs.promotion-pr-number }}
+          trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
+          plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          approval-mode: ${{ vars.STAGING_APPROVAL_MODE || 'independent' }}
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+
+      - name: Download exact saved plan into isolated plan directory
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.metadata.outputs.plan-artifact-id }}
+          path: ${{ runner.temp }}/staging-verification/plan
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.metadata.outputs.producer-run-id }}
+          digest-mismatch: error
+
+      - name: Download exact signed evidence into isolated evidence directory
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.metadata.outputs.evidence-artifact-id }}
+          path: ${{ runner.temp }}/staging-verification/evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.metadata.outputs.producer-run-id }}
+          digest-mismatch: error
+
+      - name: Verify plan bytes and RSA-PSS signature and revalidate current authorization
+        id: accept
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@1ab81ad685bde7c4c9d0d1b288decc92a5cd3820
+        with:
+          verification-mode: terraform-verification
+          promotion-pr-number: ${{ inputs.promotion-pr-number }}
+          expected-manifest-sha: ${{ steps.metadata.outputs.manifest-sha256 }}
+          trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
+          plan-artifact-path: ${{ runner.temp }}/staging-verification/plan/tfplan
+          evidence-record-path: ${{ runner.temp }}/staging-verification/evidence/evidence.json
+          evidence-signature-path: ${{ runner.temp }}/staging-verification/evidence/signature.b64
+          plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          plan-signing-public-key-der-b64: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}
+          approval-mode: ${{ vars.STAGING_APPROVAL_MODE || 'independent' }}
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
