@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -191,6 +192,29 @@ class TerraformVerificationTest(unittest.TestCase):
         ).decode()
         self.assert_rejected()
 
+    def test_signed_record_cannot_substitute_target_source_layer_or_plan(self):
+        for field, value in (
+            ("target_account_id", "999999999999"), ("source_pull_request_head_sha", "0" * 40),
+            ("plan_sha256", "sha256:" + "0" * 64), ("producer_run_attempt", 2),
+        ):
+            with self.subTest(field=field):
+                self.record_path.write_bytes(canonical_record({**self.record, field: value}))
+                self.assert_rejected()
+
+    def test_final_pass_rechecks_source_label_and_manifest_after_metadata(self):
+        self.environment["VERIFICATION_MODE"] = "terraform-metadata"
+        self.assertNotIn("verification_result", self.run_gate())
+        self.environment["VERIFICATION_MODE"] = "terraform-verification"
+        source_pr = self.responses[f"{self.prefix}/pulls/91"]
+        source_pr["labels"] = [{"name": "staging-plan:nervous-system"}]
+        self.assert_rejected()
+        source_pr["labels"] = [{"name": "staging-plan:foundation"}]
+        content = self.responses[
+            f"{self.prefix}/contents/.github/staging-promotion.json?ref={self.promotion_head}"
+        ]
+        content["content"] = base64.b64encode(self.manifest_bytes + b"\n").decode()
+        self.assert_rejected()
+
     def test_wrong_context_target_producer_or_manifest_is_rejected(self):
         for key, value in (
             ("GITHUB_EVENT_NAME", "pull_request"), ("GITHUB_REF", "refs/heads/feature"),
@@ -255,3 +279,63 @@ class TerraformVerificationTest(unittest.TestCase):
             with self.subTest(changes=changes):
                 content["content"] = base64.b64encode(json.dumps({**self.manifest, **changes}).encode()).decode()
                 self.assert_rejected()
+
+
+class TerraformVerificationWorkflowTest(unittest.TestCase):
+    def setUp(self):
+        self.workflow = (
+            fixtures.ROOT / ".github/workflows/staging-terraform-verification.yml"
+        ).read_text()
+
+    def test_only_readonly_verification_job_and_pinned_nonexecuting_steps_are_reachable(self):
+        jobs = self.workflow.split("\njobs:\n", 1)[1]
+        self.assertEqual(re.findall(r"(?m)^  ([\w-]+):$", jobs), ["verify"])
+        header, steps = jobs.split("    steps:\n", 1)
+        permissions = header.split("    permissions:\n", 1)[1].split("    outputs:\n", 1)[0]
+        self.assertEqual(dict(re.findall(r"      ([\w-]+): (\w+)", permissions)), {
+            "actions": "read", "checks": "read", "contents": "read", "pull-requests": "read",
+        })
+        self.assertIn("    environment: staging\n", header)
+        uses = re.findall(r"(?m)^        uses: (.+)$", steps)
+        self.assertEqual(len(uses), 4)
+        self.assertEqual(uses[0], uses[3])
+        self.assertRegex(uses[0], r"^Celoria-Industries/\.github/\.github/actions/staging-promotion-gate@[a-f0-9]{40}$")
+        self.assertEqual(uses[1:3], [
+            "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
+        ] * 2)
+        for prohibited in ("run:", "secrets:", "id-token:", "continue-on-error:", "if:",
+                           "consume-solo", "configure-aws-credentials", "checkout@", "promote:"):
+            self.assertNotIn(prohibited, self.workflow)
+        self.assertIn("value: ${{ jobs.verify.outputs.verification_result }}", self.workflow)
+        self.assertIn("verification_result: ${{ steps.accept.outputs.verification-result }}", header)
+        self.assertNotIn("steps.metadata.outputs", header)
+
+    def test_exact_artifact_downloads_use_independent_single_artifact_layout_and_final_revalidation(self):
+        steps = self.workflow.split("    steps:\n", 1)[1].split("      - name: ")[1:]
+        self.assertEqual(len(steps), 4)
+        self.assertIn("verification-mode: terraform-metadata", steps[0])
+        for step, artifact, directory in ((steps[1], "plan", "plan"), (steps[2], "evidence", "evidence")):
+            self.assertIn(f"artifact-ids: ${{{{ steps.metadata.outputs.{artifact}-artifact-id }}}}", step)
+            self.assertIn(f"path: ${{{{ runner.temp }}}}/staging-verification/{directory}\n", step)
+            self.assertIn("run-id: ${{ steps.metadata.outputs.producer-run-id }}", step)
+            self.assertIn("repository: ${{ github.repository }}", step)
+            self.assertIn("github-token: ${{ github.token }}", step)
+            self.assertIn("digest-mismatch: error", step)
+        final = steps[3]
+        for required in (
+            "verification-mode: terraform-verification",
+            "expected-manifest-sha: ${{ steps.metadata.outputs.manifest-sha256 }}",
+            "plan-artifact-path: ${{ runner.temp }}/staging-verification/plan/tfplan",
+            "evidence-record-path: ${{ runner.temp }}/staging-verification/evidence/evidence.json",
+            "evidence-signature-path: ${{ runner.temp }}/staging-verification/evidence/signature.b64",
+            "plan-signing-public-key-der-b64: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}",
+        ):
+            self.assertIn(required, final)
+        for step in (steps[0], final):
+            for binding in (
+                "promotion-pr-number: ${{ inputs.promotion-pr-number }}",
+                "solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}",
+                "solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}",
+                "trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}",
+            ):
+                self.assertIn(binding, step)

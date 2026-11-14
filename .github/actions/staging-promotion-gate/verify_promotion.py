@@ -935,7 +935,11 @@ def main():
     if mode == "terraform-verification":
         outputs["verification_result"] = "verified"
     write_outputs(outputs)
-    print(f"Verified {kind} staging promotion in PR #{pr_number} at {head_sha}")
+    if terraform_verification:
+        scope = "signed plan and bytes" if mode == "terraform-verification" else "metadata only"
+        print(f"Verified Terraform {scope} in PR #{pr_number} at {head_sha}; no consumption or deployment")
+    else:
+        print(f"Verified {kind} staging promotion in PR #{pr_number} at {head_sha}")
 
 
 if __name__ == "__main__":
