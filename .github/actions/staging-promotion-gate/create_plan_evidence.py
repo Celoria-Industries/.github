@@ -12,8 +12,6 @@ from verify_promotion import (
     repository_file,
     validate_full_sha,
     validate_plan_layer_pr,
-    validate_plan_check_run,
-    list_check_runs,
     validate_reviewed_pr,
     terraform_root_for_layer,
     approval_mode,
@@ -44,10 +42,10 @@ def main():
     terraform_root = terraform_root_for_layer(plan_layer)
     source_pr, source_head = validate_reviewed_pr(
         GitHubApi(), repository, source_pr_number,
+        plan_layer=plan_layer,
         solo_source_extras={"plan_layer": plan_layer, "terraform_root": terraform_root},
     )
     validate_plan_layer_pr(source_pr, plan_layer)
-    validate_plan_check_run(list_check_runs(GitHubApi(), repository, source_head), terraform_root)
     source_merge = validate_full_sha(source_pr.get("merge_commit_sha"), "source PR merge SHA")
     expected_head = validate_full_sha(required_env("SOURCE_PR_HEAD_SHA"), "SOURCE_PR_HEAD_SHA")
     require(source_head == expected_head, "Source PR head changed after plan creation")

@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 import sys
 from unittest.mock import patch
+from staging_check_fixtures import terraform_checks_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,10 @@ from plan_evidence import (  # noqa: E402
     verify_plan_evidence,
 )
 from verify_promotion import GitHubApi  # noqa: E402
-from verify_promotion import GateError, validate_terraform_manifest  # noqa: E402
+from verify_promotion import (  # noqa: E402
+    GateError, main as gate_main, validate_reviewed_pr,
+    validate_source_terraform_run, validate_terraform_manifest,
+)
 
 
 WORKFLOW_SHA = "1" * 40
@@ -130,6 +134,11 @@ class CreatePlanEvidenceTest(unittest.TestCase):
             },
             f"{prefix}/actions/artifacts/102": self.artifact,
         }
+        source_responses, checks = terraform_checks_fixture(repository, head)
+        self.responses.update(source_responses)
+        self.responses[f"{prefix}/commits/{head}/check-runs?filter=latest&per_page=100&page=1"] = {
+            "total_count": len(checks), "check_runs": checks,
+        }
         self.environment = {
             "GH_TOKEN": "synthetic-test-token",
             "GITHUB_REPOSITORY": repository,
@@ -157,6 +166,28 @@ class CreatePlanEvidenceTest(unittest.TestCase):
         self.run_entrypoint()
         self.assertEqual((self.output / "evidence.json").read_bytes(), canonical_record(self.record))
         self.assertEqual(strict_record((self.output / "evidence.json").read_bytes()), self.record)
+
+    def test_source_mode_uses_authoritative_layer_run_without_relaxing_generic_checks(self):
+        output = Path(self.tempdir.name) / "gate-output"
+        environment = {
+            **self.environment, "VERIFICATION_MODE": "source-pr", "GITHUB_OUTPUT": str(output),
+            "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
+        }
+        with patch.dict(os.environ, environment, clear=True), \
+                patch.object(GitHubApi, "get", side_effect=self.responses.__getitem__):
+            gate_main()
+            with self.assertRaisesRegex(GateError, "failed, incomplete, or cancelled"):
+                validate_reviewed_pr(GitHubApi(), self.record["source_repository"], 91)
+        self.assertIn(f"source_commit={MERGE_SHA}", output.read_text())
+        self.assertIn("plan_layer=foundation", output.read_text())
+
+    def test_entrypoint_rejects_latest_ci_failure_before_writing_evidence(self):
+        runs = next(value["workflow_runs"] for value in self.responses.values() if "workflow_runs" in value)
+        runs[0]["conclusion"] = "failure"
+        with self.assertRaises(SystemExit) as result:
+            self.run_entrypoint()
+        self.assertEqual(result.exception.code, 1)
+        self.assertFalse(self.output.exists())
 
     def test_entrypoint_rejects_artifact_digest_substitution_before_output(self):
         result, output = self.normalize_upload("Normalize saved-plan upload digest", PROVIDER_UPLOAD_DIGEST)
@@ -223,6 +254,23 @@ class CreatePlanEvidenceTest(unittest.TestCase):
         self.assertEqual(source["plan_sha256"], evidence["plan_sha256"])
         self.assertEqual(source["evidence_artifact_digest"], "sha256:" + evidence_upload_digest)
         self.assertEqual(source["terraform_root"], evidence["terraform_root"])
+        prefix = f"/repos/{evidence['source_repository']}"
+        self.responses[f"{prefix}/actions/runs/101/attempts/1"].update(
+            status="completed", conclusion="success"
+        )
+        self.responses[f"{prefix}/actions/artifacts/103"] = {
+            **self.artifact, "id": 103, "name": source["evidence_artifact_name"],
+            "digest": source["evidence_artifact_digest"],
+        }
+        self.responses[f"{prefix}/actions/runs/101/artifacts?per_page=100&page=1"] = {
+            "total_count": 2,
+            "artifacts": [self.artifact, self.responses[f"{prefix}/actions/artifacts/103"]],
+        }
+        with patch.dict(os.environ, self.environment, clear=True), \
+                patch.object(GitHubApi, "get", side_effect=self.responses.__getitem__):
+            validate_source_terraform_run(
+                GitHubApi(), evidence["source_repository"], source, evidence["producer_workflow_ref"]
+            )
         for field in ("plan_artifact_digest", "evidence_artifact_digest"):
             with self.subTest(field=field):
                 source[field] = source[field].removeprefix("sha256:")

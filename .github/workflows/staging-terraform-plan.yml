@@ -58,7 +58,7 @@ jobs:
     steps:
       - name: Validate merged source PR and current human approval
         id: gate
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@c328719b5917a99f953dec0d0394988eb2b67c1e
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@724119f897ab21f95ca7bf0bf0e745232f77f45b
         with:
           verification-mode: source-pr
           source-pr-number: ${{ inputs.source-pr-number }}
@@ -246,7 +246,7 @@ jobs:
           digest-mismatch: error
 
       - name: Validate provenance and prepare canonical record
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@c328719b5917a99f953dec0d0394988eb2b67c1e
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@724119f897ab21f95ca7bf0bf0e745232f77f45b
         with:
           operation: prepare-plan-evidence
           source-pr-number: ${{ inputs.source-pr-number }}

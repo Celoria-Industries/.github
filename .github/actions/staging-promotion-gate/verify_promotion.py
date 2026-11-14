@@ -197,7 +197,128 @@ def validate_plan_check_run(check_runs, terraform_root):
             f"Terraform plan check for {terraform_root} did not succeed")
 
 
-def validate_reviewed_pr(api, repository, number, required_head=None, promotion=False, solo_source_extras=None):
+def validate_terraform_source_checks(api, repository, head_sha, layer, check_runs):
+    root = terraform_root_for_layer(layer)
+    workflow = api.get(f"/repos/{repository}/actions/workflows/terraform.yml")
+    require(workflow.get("path") == ".github/workflows/terraform.yml"
+            and type(workflow.get("id")) is int, "Cannot identify the Terraform PR workflow")
+    runs = []
+    for page in range(1, 101):
+        response = api.get(
+            f"/repos/{repository}/actions/workflows/{workflow['id']}/runs"
+            f"?event=pull_request&head_sha={head_sha}&per_page=100&page={page}"
+        )
+        runs.extend(response.get("workflow_runs", []))
+        total = response.get("total_count")
+        require(type(total) is int and total >= len(runs), "Invalid Terraform workflow run count")
+        if len(runs) >= total:
+            break
+    else:
+        fail("Too many Terraform workflow runs to select safely")
+    require(bool(runs), "Source head has no Terraform PR workflow run")
+    for run in runs:
+        require(
+            type(run.get("id")) is int and type(run.get("check_suite_id")) is int
+            and run.get("head_sha") == head_sha and run.get("event") == "pull_request"
+            and run.get("workflow_id") == workflow["id"]
+            and run.get("path") == ".github/workflows/terraform.yml"
+            and isinstance(run.get("run_started_at"), str)
+            and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", run["run_started_at"])
+            and (run.get("repository") or {}).get("full_name") == repository
+            and (run.get("head_repository") or {}).get("full_name") == repository,
+            "Terraform PR run has unexpected workflow, repository, event or head",
+        )
+    latest = max(runs, key=lambda run: (run["run_started_at"], run["id"]))
+    require(latest.get("status") == "completed" and latest.get("conclusion") == "success",
+            "Latest same-head Terraform PR run did not succeed")
+    attempt = parse_positive_int(latest.get("run_attempt"), "Terraform PR run attempt")
+    jobs = []
+    for page in range(1, 101):
+        response = api.get(
+            f"/repos/{repository}/actions/runs/{latest['id']}/attempts/{attempt}/jobs"
+            f"?per_page=100&page={page}"
+        )
+        jobs.extend(response.get("jobs", []))
+        total = response.get("total_count")
+        require(type(total) is int and total >= len(jobs), "Invalid Terraform job count")
+        if len(jobs) >= total:
+            break
+    else:
+        fail("Too many Terraform jobs to verify safely")
+    require(bool(jobs), "Latest Terraform PR attempt has no job evidence")
+    current_checks = {check.get("id"): check for check in check_runs
+                      if (check.get("check_suite") or {}).get("id") == latest["check_suite_id"]}
+    require(len(current_checks) == len(jobs)
+            and set(current_checks) == {job.get("id") for job in jobs},
+            "Latest Terraform attempt job/check identities are ambiguous")
+    for job in jobs:
+        check = current_checks.get(job.get("id"), {})
+        require(
+            job.get("head_sha") == head_sha and check.get("head_sha") == head_sha
+            and (check.get("app") or {}).get("id") == 15368
+            and (check.get("app") or {}).get("slug") == "github-actions"
+            and job.get("name") == check.get("name")
+            and job.get("status") == check.get("status") == "completed"
+            and job.get("conclusion") == check.get("conclusion")
+            and job.get("conclusion") in ("success", "neutral", "skipped"),
+            "Latest Terraform attempt has missing, failed or mismatched job/check evidence",
+        )
+
+    tree = api.get(f"/repos/{repository}/git/trees/{head_sha}?recursive=1")
+    require(tree.get("truncated") is False and isinstance(tree.get("tree"), list),
+            "Cannot completely enumerate source Terraform roots")
+    roots = set()
+    for entry in tree["tree"]:
+        match = re.fullmatch(
+            r"(stacks/(?:_global/[^/]+|[a-z0-9][a-z0-9-]*/(?:dev|staging|prod)/[^/]+))/[^/]+\.tf",
+            entry.get("path", ""),
+        )
+        if entry.get("type") == "blob" and match:
+            candidate = match[1]
+            if candidate != "stacks/_global/github" and not re.search(
+                r"/(?:dev|staging|prod)/baseline$", candidate
+            ):
+                roots.add(candidate)
+    require(root in roots, "Selected staging root is absent from the source head")
+    selected_roots = {
+        candidate for candidate in roots
+        if not candidate.startswith("stacks/celoria-industries/staging/") or candidate == root
+    }
+    expected_names = {"Discover Terraform roots", "Terraform validation", "Report PR plan status"}
+    for candidate in selected_roots:
+        expected_names.update((f"Plan {candidate} / Validate Terraform caller",
+                               f"Plan {candidate} / Plan {candidate}"))
+    for name in expected_names:
+        matching = [job for job in jobs if job.get("name") == name]
+        require(len(matching) == 1 and matching[0].get("conclusion") == "success",
+                f"Latest Terraform PR attempt lacks successful required check: {name}")
+    planned_roots = {
+        match[1] for job in jobs
+        if (match := re.fullmatch(r"Plan (.+) / Plan \1", job.get("name", "")))
+    }
+    require(planned_roots == selected_roots,
+            "Latest Terraform PR run does not match the current staging layer selection")
+
+    # Only superseded suites proven to belong to this same-head workflow are inapplicable.
+    terraform_suites = {run["check_suite_id"] for run in runs}
+    other_checks = []
+    for check in check_runs:
+        app = check.get("app") or {}
+        require(type(check.get("id")) is int and type(app.get("id")) is int
+                and check.get("head_sha") == head_sha and isinstance(check.get("name"), str),
+                "Source check has incomplete identity or wrong head")
+        if ((check.get("check_suite") or {}).get("id") in terraform_suites
+                and app.get("id") == 15368 and app.get("slug") == "github-actions"):
+            continue
+        other_checks.append(check)
+    require(all(check.get("status") == "completed"
+                and check.get("conclusion") in ("success", "neutral", "skipped")
+                for check in other_checks),
+            "Source PR has unrelated effective failed, incomplete or cancelled checks")
+
+
+def validate_reviewed_pr(api, repository, number, required_head=None, promotion=False,
+                        solo_source_extras=None, plan_layer=None):
     pr = api.get(f"/repos/{repository}/pulls/{number}")
     require(pr.get("state") == "closed" and pr.get("merged_at"), f"PR #{number} is not merged")
     require(pr.get("base", {}).get("ref") == "main", f"PR #{number} must target main")
@@ -248,11 +369,17 @@ def validate_reviewed_pr(api, repository, number, required_head=None, promotion=
     require(bool(check_runs), f"PR #{number} has no check-run evidence")
     require(not any(review.get("state") in ("CHANGES_REQUESTED", "DISMISSED") for review in latest.values()),
             f"PR #{number} has unresolved change requests or dismissed approvals")
-    require(all(
-        check.get("status") == "completed"
-        and check.get("conclusion") in ("success", "neutral", "skipped")
-        for check in check_runs
-    ), f"PR #{number} has failed, incomplete, or cancelled checks")
+    if plan_layer is not None:
+        require(repository == PLAN_REPOSITORY and not promotion,
+                "Layer-specific check selection is restricted to the Terraform source repository")
+        validate_plan_layer_pr(pr, plan_layer)
+        validate_terraform_source_checks(api, repository, head_sha, plan_layer, check_runs)
+    else:
+        require(all(
+            check.get("status") == "completed"
+            and check.get("conclusion") in ("success", "neutral", "skipped")
+            for check in check_runs
+        ), f"PR #{number} has failed, incomplete, or cancelled checks")
 
     if promotion:
         require(pr.get("changed_files") == 1, "Promotion PR must change only the staging-promotion manifest")
@@ -515,13 +642,13 @@ def validate_terraform_artifact(api, repository, artifact_id, name, digest, run_
 def validate_source_terraform_run(api, repository, source, trusted_workflow):
     source_pr, source_head = validate_reviewed_pr(
         api, repository, source["pull_request_number"],
+        plan_layer=source["plan_layer"],
         solo_source_extras={
             "plan_layer": source["plan_layer"],
             "terraform_root": source["terraform_root"],
         },
     )
     validate_plan_layer_pr(source_pr, source["plan_layer"])
-    validate_plan_check_run(list_check_runs(api, repository, source_head), source["terraform_root"])
     require(source_head == source["pull_request_head_sha"],
             "Terraform source PR head changed after plan creation")
     merge_sha = validate_full_sha(source_pr.get("merge_commit_sha"), "Terraform source PR merge SHA")
@@ -676,10 +803,10 @@ def main():
         api = GitHubApi()
         source_pr, head_sha = validate_reviewed_pr(
             api, repository, pr_number,
+            plan_layer=plan_layer,
             solo_source_extras={"plan_layer": plan_layer, "terraform_root": terraform_root},
         )
         validate_plan_layer_pr(source_pr, plan_layer)
-        validate_plan_check_run(list_check_runs(api, repository, head_sha), terraform_root)
         merge_sha = validate_full_sha(source_pr.get("merge_commit_sha"), f"PR #{pr_number} merge SHA")
         write_outputs({
             "source_pr_number": pr_number,

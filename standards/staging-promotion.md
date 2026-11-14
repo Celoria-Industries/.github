@@ -155,9 +155,19 @@ Terraform root path, command, or artifact. The layer enum maps in trusted
 central code to exactly one path under
 `stacks/celoria-industries/staging/`; the source PR must carry exactly one
 matching `staging-plan:<layer>` label. Missing, duplicate, or unknown layer
-labels fail closed. The gate also requires the successful source-PR check run
-named `Plan <root> / Plan <root>` for that exact mapped root and exact PR head;
-this makes the central saved plan selection agree with the IaC PR-CI selector.
+labels fail closed. Source validation, evidence creation and promotion
+revalidation select the newest same-head `pull_request` run of the IaC
+`terraform.yml` workflow (by latest attempt start time, then run ID), never an
+older green run over a newer failed or pending attempt. Its latest attempt
+must succeed, with matching GitHub Actions app/head/suite/job identities.
+Discovery, validation, PR status summary, every nonstaging root's caller and
+plan, and exactly the selected staging root's caller and plan must succeed.
+Roots are enumerated from the exact source tree using the IaC matrix's
+exclusions; incomplete tree or check evidence fails closed.
+Only suites independently identified as superseded same-head runs of that
+exact workflow are excluded. Other workflow/app check failures remain
+blocking, and generic image/promotion-PR check validation is unchanged.
+This makes the central saved plan selection agree with the IaC PR-CI selector.
 The existing IaC pull-request planning behavior is owned by that repository
 and is not changed here.
 

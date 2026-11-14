@@ -78,7 +78,7 @@ jobs:
 
       - name: Validate promotion request
         id: gate
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@724119f897ab21f95ca7bf0bf0e745232f77f45b
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           trusted-image-producer-workflow: ${{ vars.STAGING_TRUSTED_IMAGE_WORKFLOW }}
@@ -129,7 +129,7 @@ jobs:
       - name: Revalidate solo authorization and image evidence
         id: image-authorization
         if: needs.verify.outputs.approval_mode == 'solo' && needs.verify.outputs.promotion_kind == 'image'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@724119f897ab21f95ca7bf0bf0e745232f77f45b
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -146,7 +146,7 @@ jobs:
       - name: Revalidate solo authorization and Terraform evidence
         id: plan-authorization
         if: needs.verify.outputs.approval_mode == 'solo' && needs.verify.outputs.promotion_kind == 'terraform'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@724119f897ab21f95ca7bf0bf0e745232f77f45b
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -191,7 +191,7 @@ jobs:
 
       - name: Consume the exact solo authorization
         if: needs.verify.outputs.approval_mode == 'solo'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@724119f897ab21f95ca7bf0bf0e745232f77f45b
         with:
           operation: consume-solo
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
@@ -254,7 +254,7 @@ jobs:
       - name: Revalidate reviewed image evidence
         id: image-gate
         if: needs.verify.outputs.promotion_kind == 'image'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@724119f897ab21f95ca7bf0bf0e745232f77f45b
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
@@ -275,7 +275,7 @@ jobs:
       - name: Verify downloaded Terraform plan and KMS signature
         id: plan-gate
         if: needs.verify.outputs.promotion_kind == 'terraform'
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@b3a461e8562e3ba10b5198d79c80682173f57fef
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@724119f897ab21f95ca7bf0bf0e745232f77f45b
         with:
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
           expected-manifest-sha: ${{ needs.verify.outputs.manifest_sha256 }}
