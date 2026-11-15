@@ -370,7 +370,7 @@ def validate_reviewed_pr(api, repository, number, required_head=None, promotion=
     require(not any(review.get("state") in ("CHANGES_REQUESTED", "DISMISSED") for review in latest.values()),
             f"PR #{number} has unresolved change requests or dismissed approvals")
     if plan_layer is not None:
-        require(repository == PLAN_REPOSITORY and not promotion,
+        require(repository == PLAN_REPOSITORY,
                 "Layer-specific check selection is restricted to the Terraform source repository")
         validate_plan_layer_pr(pr, plan_layer)
         validate_terraform_source_checks(api, repository, head_sha, plan_layer, check_runs)
@@ -838,7 +838,23 @@ def main():
     pr_number = parse_positive_int(os.environ.get("PROMOTION_PR_NUMBER"), "promotion-pr-number")
     expected_manifest_sha = os.environ.get("EXPECTED_MANIFEST_SHA", "")
     api = GitHubApi()
-    promotion_pr, head_sha = validate_reviewed_pr(api, repository, pr_number, promotion=True)
+    promotion_layer = None
+    promotion_head = None
+    if terraform_verification:
+        candidate_pr = api.get(f"/repos/{repository}/pulls/{pr_number}")
+        promotion_head = validate_full_sha(candidate_pr.get("head", {}).get("sha"), "Promotion PR head")
+        labels = [
+            label.get("name") for label in candidate_pr.get("labels", [])
+            if isinstance(label, dict) and isinstance(label.get("name"), str)
+            and label["name"].startswith("staging-plan:")
+        ]
+        require(len(labels) == 1, "Promotion PR must have exactly one staging-plan:<layer> label")
+        promotion_layer = labels[0].removeprefix("staging-plan:")
+        validate_plan_layer_pr(candidate_pr, promotion_layer)
+    promotion_pr, head_sha = validate_reviewed_pr(
+        api, repository, pr_number, required_head=promotion_head,
+        promotion=True, plan_layer=promotion_layer,
+    )
     path = urllib.parse.quote(MANIFEST_PATH, safe="/")
     response = api.get(f"/repos/{repository}/contents/{path}?ref={head_sha}")
     require(response.get("encoding") == "base64" and isinstance(response.get("content"), str),
@@ -889,6 +905,9 @@ def main():
         }
         require(all(expected.values()), "Staging Terraform target, root, and signing key must be configured")
         source = validate_terraform_manifest(manifest, repository, trusted_workflow, expected)
+        if terraform_verification:
+            require(source["plan_layer"] == promotion_layer,
+                    "Promotion PR staging-plan label does not match the manifest layer")
         if approval_mode() == "solo":
             require(source["target_account_id"] == os.environ.get("STAGING_SOLO_TARGET_ACCOUNT_ID")
                     and source["target_region"] == os.environ.get("STAGING_SOLO_TARGET_REGION"),
