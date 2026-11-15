@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import test_staging_plan_evidence as fixtures
+import test_staging_solo_approval as solo
 from staging_check_fixtures import terraform_checks_fixture
 from plan_evidence import canonical_record
 from verify_promotion import GateError, GitHubApi, main
@@ -331,6 +332,45 @@ class TerraformVerificationTest(unittest.TestCase):
             with self.subTest(changes=changes):
                 content["content"] = base64.b64encode(json.dumps({**self.manifest, **changes}).encode()).decode()
                 self.assert_rejected()
+
+    def test_apply_consumption_rejects_replay_and_writer_rechecks_consumed_authorization(self):
+        outputs = self.run_gate()
+        env = {
+            **solo.ledger_env(),
+            "STAGING_SOLO_SOURCE_COMMENT_ID": "901",
+            "STAGING_SOLO_PROMOTION_COMMENT_ID": "902",
+            "PROMOTION_PR_NUMBER": "92", "SOURCE_PR_NUMBER": outputs["source_pr_number"],
+            "SOURCE_HEAD_SHA": outputs["source_pull_request_head_sha"],
+            "PROMOTION_HEAD_SHA": outputs["promotion_head_sha"],
+            "MANIFEST_SHA256": outputs["manifest_sha256"],
+            "AUTHORIZED_AT": outputs["solo_authorization_created_at"],
+            "SOURCE_AUTHORIZED_AT": outputs["solo_source_authorization_created_at"],
+            "TARGET_RESOURCE": outputs["solo_target_resource"],
+            "STAGING_SOLO_TARGET_ACCOUNT_ID": self.record["target_account_id"],
+            "STAGING_SOLO_TARGET_REGION": self.record["target_region"],
+        }
+        seen = set()
+
+        def ledger(args, **kwargs):
+            if args[1] == "sts":
+                return subprocess.CompletedProcess(args, 0, "987654321098\n", "")
+            self.assertIn("attribute_not_exists(authorization_id)", args)
+            item = json.loads(args[args.index("--item") + 1])
+            self.assertEqual(item["manifest_sha256"]["S"], self.manifest_sha)
+            key = item["authorization_id"]["S"]
+            exists = key in seen
+            seen.add(key)
+            return subprocess.CompletedProcess(args, int(exists), "", "")
+
+        solo.consume(env, ledger)
+        with self.assertRaises(solo.ConsumptionError):
+            solo.consume({**env, "GITHUB_RUN_ID": "112"}, ledger)
+        with self.assertRaises(solo.ConsumptionError):
+            solo.consume({**env, "GITHUB_RUN_ATTEMPT": "2"}, ledger)
+        # A successful consume is never a substitute for the writer's fresh verification.
+        comment = self.responses[f"{self.prefix}/issues/comments/902"]
+        comment["updated_at"] = "2000-01-01T00:00:00Z"
+        self.assert_rejected()
 
 
 class TerraformVerificationWorkflowTest(unittest.TestCase):
