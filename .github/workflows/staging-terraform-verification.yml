@@ -72,7 +72,7 @@ jobs:
     steps:
       - name: Validate exact Terraform promotion metadata and authorizations
         id: metadata
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@1ab81ad685bde7c4c9d0d1b288decc92a5cd3820
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@902db20294a0d5e60e255dd0461d7ac10bb7e251
         with:
           verification-mode: terraform-metadata
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
@@ -110,7 +110,7 @@ jobs:
 
       - name: Verify plan bytes and RSA-PSS signature and revalidate current authorization
         id: accept
-        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@1ab81ad685bde7c4c9d0d1b288decc92a5cd3820
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@902db20294a0d5e60e255dd0461d7ac10bb7e251
         with:
           verification-mode: terraform-verification
           promotion-pr-number: ${{ inputs.promotion-pr-number }}
