@@ -30,6 +30,12 @@ and RSA-PSS signature. The public key, immutable KMS key ARN, target account
 and region come from trusted configuration, never the manifest alone.
 `verification-result: verified` is emitted only after signature and plan-byte
 verification; metadata success cannot emit it.
+Both source and promotion PRs use the same newest same-head Terraform
+run/latest-attempt selection described below. The promotion PR must carry
+exactly one `staging-plan:<layer>` label matching its manifest. Superseded
+all-layer failures are excluded only when proven to belong to the exact
+workflow; newer failed/pending selected runs and unrelated failures still
+block acceptance.
 
 This is repeatable read-only acceptance, **not single-use authorization**:
 it does not consume the solo ledger, reserve a deployment or authorize a

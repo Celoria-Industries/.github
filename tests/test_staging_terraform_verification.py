@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import test_staging_plan_evidence as fixtures
+from staging_check_fixtures import terraform_checks_fixture
 from plan_evidence import canonical_record
 from verify_promotion import GateError, GitHubApi, main
 
@@ -93,6 +94,22 @@ class TerraformVerificationTest(unittest.TestCase):
             },
             prefix: {"id": 123},
         })
+        promotion_responses, promotion_checks = terraform_checks_fixture(self.repository, self.promotion_head)
+        # Real PR102 overlap: cancelled all-layer run, followed by the successful selector run.
+        runs_path = (
+            f"{prefix}/actions/workflows/401/runs?event=pull_request"
+            f"&head_sha={self.promotion_head}&per_page=100&page=1"
+        )
+        runs = promotion_responses[runs_path]["workflow_runs"]
+        runs[0]["id"] = 43745508273
+        runs[1]["id"] = 43745468635
+        promotion_responses[
+            f"{prefix}/actions/runs/43745508273/attempts/1/jobs?per_page=100&page=1"
+        ] = promotion_responses.pop(f"{prefix}/actions/runs/302/attempts/1/jobs?per_page=100&page=1")
+        self.responses.update(promotion_responses)
+        self.responses[f"{prefix}/commits/{self.promotion_head}/check-runs?filter=latest&per_page=100&page=1"] = {
+            "total_count": len(promotion_checks), "check_runs": promotion_checks,
+        }
         self.responses[f"{prefix}/actions/runs/101/attempts/1"].update(
             status="completed", conclusion="success"
         )
@@ -170,6 +187,41 @@ class TerraformVerificationTest(unittest.TestCase):
         self.assertEqual(outputs["verification_result"], "verified")
         self.assertEqual(outputs["plan_layer"], "foundation")
         self.assertEqual(outputs["manifest_sha256"], self.manifest_sha)
+
+    def test_promotion_latest_failed_or_pending_run_cannot_use_superseded_checks(self):
+        path = (f"{self.prefix}/actions/workflows/401/runs?event=pull_request"
+                f"&head_sha={self.promotion_head}&per_page=100&page=1")
+        runs = self.responses[path]["workflow_runs"]
+        self.assertEqual([run["id"] for run in runs], [43745508273, 43745468635])
+        for mode in ("terraform-metadata", "terraform-verification"):
+            self.environment["VERIFICATION_MODE"] = mode
+            for field, value in (("conclusion", "failure"), ("status", "in_progress")):
+                with self.subTest(mode=mode, field=field):
+                    original = runs[0][field]
+                    runs[0][field] = value
+                    self.assert_rejected()
+                    runs[0][field] = original
+
+    def test_promotion_label_must_match_manifest_and_selected_run(self):
+        pr = self.responses[f"{self.prefix}/pulls/92"]
+        for labels in ([], [{"name": "staging-plan:unknown"}],
+                       [{"name": "staging-plan:nervous-system"}],
+                       [{"name": "staging-plan:foundation"}] * 2):
+            with self.subTest(labels=labels):
+                pr["labels"] = labels
+                self.assert_rejected()
+
+    def test_promotion_unrelated_failed_check_is_not_superseded(self):
+        path = (f"{self.prefix}/commits/{self.promotion_head}/check-runs"
+                "?filter=latest&per_page=100&page=1")
+        response = self.responses[path]
+        response["check_runs"].append({
+            "id": 9999, "name": "Security", "head_sha": self.promotion_head,
+            "app": {"id": 99, "slug": "security"}, "check_suite": {"id": 999},
+            "status": "completed", "conclusion": "failure",
+        })
+        response["total_count"] += 1
+        self.assert_rejected()
 
     def test_missing_local_evidence_or_prior_manifest_cannot_report_success(self):
         for key in ("PLAN_ARTIFACT_PATH", "EVIDENCE_RECORD_PATH", "EVIDENCE_SIGNATURE_PATH",
