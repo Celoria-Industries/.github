@@ -2,12 +2,153 @@
 
 This runbook describes a proposed shared GitHub workflow contract for
 promoting reviewed container images and Terraform plans to staging.
-**Both staging deployment paths are disabled in code:** the promotion verification job
+**Both legacy staging deployment paths remain disabled in code:** the promotion verification job
 fails unconditionally before credentials, and the dependent writer job has
 its own unconditional stop before credential configuration. No variable or
-caller input enables them. Keep staging writer trust disabled. Removing the
+caller input enables those jobs. A separate, opt-in foundation-only apply
+workflow is described below; it does not activate the legacy workflow.
+Keep staging writer trust disabled pending its manual prerequisites. Removing the
 guards requires a separately reviewed fix for the blockers below and real
 acceptance evidence; bootstrap alone is not activation.
+
+## Guarded foundation apply code (not activated)
+
+`.github/workflows/staging-terraform-apply.yml` is a separate reusable workflow,
+not a dispatch in this central repository and not an extension of the legacy
+writer. It supports **only** the signed saved plan for
+`stacks/celoria-industries/staging/foundation` in
+`Celoria-Industries/infrastructure-as-code`, in the accepted experimental
+solo mode. Missing configuration, an unprotected environment, API failure,
+or a mismatched input stops execution. There is no push, PR, schedule,
+independent-mode, image, other-layer, Dev, or production apply path.
+
+The implementation establishes the following order:
+
+1. In `staging-authorization`, verify a first-attempt `workflow_dispatch` on
+   `refs/heads/main`, exact confirmation `apply-staging-foundation`, and a
+   lowercase bare manifest SHA-256 supplied by the human. The dispatcher must
+   be the configured numeric solo authorizer and an API-confirmed human.
+   Verify protected main and both environments' exact branch-only `main`
+   deployment policies, including all policy pages. The existing source and
+   promotion PR/CI, producer, artifact and authorization gates remain mandatory.
+2. Download plan/evidence separately by exact artifact IDs/run with digest
+   mismatch fatal. Revalidate the exact manifest, current authorizations,
+   foundation root, signed record, RSA-PSS signature and saved-plan bytes.
+   Require **both** authorization comments to be strictly newer than the
+   protected apply cutoff; read-only acceptance is not permission to reuse its
+   existing comments. Then assume only the isolated ledger role and use the
+   existing conditional `PutItem` contract. Publish a same-run/first-attempt
+   receipt only after unambiguous successful consumption.
+3. Only a successful consume job can enter `staging-foundation-apply`.
+   Recheck dispatch, human, protection policies, opt-in, cutoff consistency and
+   receipt. Download the same exact artifacts again; check out only the
+   consumed reviewed merge commit, set up Terraform 1.10.5, and **again**
+   revalidate the manifest, current PR/comment authorization, artifacts,
+   signature, plan bytes, cutoff and foundation target before writer
+   credentials. Configure the bootstrap state role and member `deploy`
+   profile, check both AWS account identities, then init with the read-only
+   lock file and apply only the saved plan. There is no new plan command.
+
+All reruns are rejected, including rerunning just the writer after a successful
+consume. A new dispatch cannot reuse a consumed promotion comment. A timeout,
+ambiguous ledger response, cancellation or partial apply requires investigation
+and new human authorizations, not an automatic retry or ledger deletion.
+Whole-run concurrency serializes this path within the caller repository;
+Terraform state locking remains enabled. Do not configure a caller concurrency
+group with the same name as the reusable workflow.
+
+This preserves progressive delivery's existing lower-environment **CI**
+prerequisites: source validation includes the required non-staging roots and
+selected staging root. It does not claim that a Dev deployment or application
+health has been verified. A later higher-environment promotion must depend on
+successful lower-environment promotion/acceptance; this change adds no
+production job or production authorization. The named apply environment is
+the future reviewer gate: adding GitHub Environment reviewers when available
+is a protection-policy change, not a workflow rewrite. Reviewers complement,
+rather than silently replace, this explicit one-time authorization contract.
+
+### Remaining human/operator steps
+
+**Code is not provisioning or activation.** This change makes no dispatch,
+AWS call, ledger write, GitHub configuration change, merge, or deployment.
+The successful read-only verification
+[run 43757043160](https://github.com/Celoria-Industries/infrastructure-as-code/actions/runs/43757043160)
+proved evidence acceptance only; do not reuse its authorization comments.
+Keep the accepted producer/caller/signing pins unchanged.
+
+1. Review and merge this central change, then review a separate main-only
+   `workflow_dispatch` caller PR in the IaC repository pinned to the **actual
+   merged central SHA**. Its job must grant only Actions, Checks, Contents,
+   Pull Requests read and OIDC write. Pass `promotion-pr-number` as
+   `${{ fromJSON(inputs.promotion-pr-number) }}`, the two string comment IDs,
+   `expected-manifest-sha256` and `confirmation`. No caller input selects a
+   role, account, root, artifact, key, command or mode.
+2. Administrators must provision/verify protected `main` and both environments
+   `staging-authorization` and `staging-foundation-apply`, each with custom
+   deployment branch policies containing **exactly one** policy:
+   `name: main`, `type: branch`. An auto-created or all-branches environment
+   fails closed. Add reviewer rules to the latter when the GitHub plan permits.
+   The workflow reads these settings; it cannot establish them.
+3. Populate both environments with matching trusted producer ref, signing
+   key ARN/public DER key, plan target account/region and solo variables from
+   the existing contract. The authorization environment additionally needs
+   the four ledger variables below; the apply environment needs
+   `AWS_ROLE_ARN_STAGING_APPLY`, `AWS_DEPLOY_ROLE_ARN_STAGING_APPLY`,
+   `TF_STATE_BUCKET_STAGING` and bootstrap `AWS_REGION`. Review effective
+   repository/organization variable fallbacks as well as environment values.
+4. In both environments configure identical
+   `STAGING_FOUNDATION_APPLY_NOT_BEFORE` timestamps in UTC
+   `YYYY-MM-DDTHH:MM:SSZ` format, **after** the last read-only acceptance and
+   the reviewed caller/activation preparation. It is an administrator-owned
+   freshness floor, not a cryptographic statement that an authorization has a
+   different purpose. Keep `STAGING_FOUNDATION_APPLY_ENABLED` unset/false
+   until the IAM and environment prerequisites are accepted; the code requires
+   the literal value `true` in both environments. These variables are not
+   caller inputs.
+5. IAM owners must review actual bootstrap state/lock/KMS and staging member
+   permissions, SCP coverage, the state-to-deploy role chain, ledger retention,
+   backup/recovery, audit coverage and exclusive table writers. The accepted
+   ordinary Terraform-in-Actions risk still applies: reviewed providers,
+   modules and provisioners execute with these scoped credentials. This
+   change does not implement a provider allowlist or credential-isolated
+   execution service, or establish that either account's permissions are safe.
+6. Only after that review, administrators may separately provision the exact
+   immutable ledger/apply trusts described next and enable the two opt-ins.
+   The human must inspect the still-current plan, create **new**, unedited
+   source and later promotion JSON comments after the cutoff, and explicitly
+   dispatch the reviewed IaC main caller. Record run/attempt, manifest hash,
+   source/promotion heads, artifact IDs, ledger consumption and apply outcome.
+   A failed precondition is not permission to use the legacy workflow.
+
+### Trust-policy inputs (manual; no policy applied here)
+
+The ledger role keeps only conditional-consumption code access and
+`dynamodb:PutItem` on the existing exact retained table; the writer role has
+no ledger permission. Reuse the existing ledger schema and isolation, not a
+new table or combined deployment/ledger role. `PutItem` permission itself
+does not enforce the condition expression: exact trusted workflow identity
+and exclusion of other table writers remain essential.
+
+For the already agreed custom subject claim order `repo`, `context`,
+`job_workflow_ref`, the two **new** subjects require independently verified
+organization/repository IDs and the merged central workflow SHA:
+
+```text
+repo:Celoria-Industries@<ORG_ID>/infrastructure-as-code@<REPO_ID>:environment:staging-authorization:job_workflow_ref:Celoria-Industries/.github/.github/workflows/staging-terraform-apply.yml@<MERGED_APPLY_SHA>
+repo:Celoria-Industries@<ORG_ID>/infrastructure-as-code@<REPO_ID>:environment:staging-foundation-apply:job_workflow_ref:Celoria-Industries/.github/.github/workflows/staging-terraform-apply.yml@<MERGED_APPLY_SHA>
+```
+
+The first is for `STAGING_SOLO_LEDGER_ROLE_ARN` in
+`STAGING_SOLO_LEDGER_ACCOUNT_ID`, with its exact
+`STAGING_SOLO_LEDGER_TABLE_ARN` and `STAGING_SOLO_LEDGER_REGION`. The second is
+for the bootstrap `AWS_ROLE_ARN_STAGING_APPLY`; its separate existing role
+chain must permit only the reviewed `AWS_DEPLOY_ROLE_ARN_STAGING_APPLY`.
+Both trusts require the GitHub OIDC provider and audience `sts.amazonaws.com`.
+Do not grant either identity to the signer, planner, Dev, production or legacy
+writer; do not introduce wildcard, branch-only or bare-environment subjects.
+Verify emitted claims and rejection of wrong repository/environment/SHA
+before acceptance. No OIDC subject-template migration is performed here:
+such a migration is repository-wide and must not break existing Dev identities.
 
 ## Read-only Terraform verification acceptance
 

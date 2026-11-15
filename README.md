@@ -161,7 +161,7 @@ Workload repositories should invoke the workflow with `secrets: inherit`.
   without waiting for CI. Existing pull requests must be reopened or updated
   to trigger the caller.
 - The ECR workflow replaces the old GHCR-based interface: migrate existing callers to the new inputs and provision cache repositories and OIDC permissions before switching them to `@main`. Older callers pinned to a different ref are unaffected until updated.
-- Staging promotion is disabled pending Terraform execution-boundary and image-copy integrity validation. See the [staging promotion runbook](standards/staging-promotion.md) for the proposed approval contract and activation blockers.
+- Legacy staging promotion remains disabled. A separate foundation-only saved-plan apply workflow requires explicit human main dispatch, current signed evidence, one-time ledger consumption and protected-environment opt-ins; trust/provisioning and activation remain manual. See the [staging promotion runbook](standards/staging-promotion.md) for prerequisites and remaining blockers.
 - Container conventions, including the `/-/livez`, `/-/readyz`, `/-/healthz` and `/-/metricsz` probe standard, live in [`standards/containers.md`](standards/containers.md).
 - Service-to-service authentication (IAM/SigV4 via Pod Identity, no shared long-lived keys) is specified in [`standards/service-auth.md`](standards/service-auth.md).
 

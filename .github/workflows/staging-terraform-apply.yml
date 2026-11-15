@@ -1,0 +1,407 @@
+name: Guarded staging foundation apply
+
+on:
+  workflow_call:
+    inputs:
+      promotion-pr-number:
+        description: Merged foundation promotion PR
+        required: true
+        type: number
+      expected-manifest-sha256:
+        description: SHA-256 of exact reviewed manifest bytes, without sha256 prefix
+        required: true
+        type: string
+      source-authorization-comment-id:
+        description: New human source authorization comment ID
+        required: true
+        type: string
+      promotion-authorization-comment-id:
+        description: New human promotion authorization comment ID
+        required: true
+        type: string
+      confirmation:
+        description: Must be apply-staging-foundation
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-foundation-apply
+  cancel-in-progress: false
+
+jobs:
+  consume:
+    name: Verify foundation plan and consume authorization
+    runs-on: ubuntu-latest
+    environment: staging-authorization
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      id-token: write
+      pull-requests: read
+    outputs:
+      receipt: ${{ steps.receipt.outputs.receipt }}
+      not_before: ${{ vars.STAGING_FOUNDATION_APPLY_NOT_BEFORE }}
+      producer_run_id: ${{ steps.verified.outputs.producer-run-id }}
+      plan_artifact_id: ${{ steps.verified.outputs.plan-artifact-id }}
+      evidence_artifact_id: ${{ steps.verified.outputs.evidence-artifact-id }}
+      source_commit: ${{ steps.verified.outputs.source-commit }}
+    steps:
+      - name: Require explicit human main dispatch and protected environments
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          ATTEMPT: ${{ github.run_attempt }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          AUTHORIZER_ID: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          MODE: ${{ vars.STAGING_APPROVAL_MODE }}
+          ENABLED: ${{ vars.STAGING_FOUNDATION_APPLY_ENABLED }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          MANIFEST_SHA: ${{ inputs.expected-manifest-sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$REPOSITORY" == "Celoria-Industries/infrastructure-as-code" && "$EVENT" == "workflow_dispatch" && "$REF" == "refs/heads/main" ]] || { echo "::error::Only an explicit infrastructure main dispatch may apply"; exit 1; }
+          [[ "$ATTEMPT" == "1" ]] || { echo "::error::Reruns cannot apply; investigate and use a new dispatch and authorization"; exit 1; }
+          [[ "$ENABLED" == "true" && "$MODE" == "solo" && "$CONFIRMATION" == "apply-staging-foundation" ]] || { echo "::error::Foundation apply is not explicitly enabled and confirmed in solo mode"; exit 1; }
+          [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::An exact reviewed manifest SHA-256 is required"; exit 1; }
+          [[ "$AUTHORIZER_ID" =~ ^[1-9][0-9]*$ && "$ACTOR_ID" == "$AUTHORIZER_ID" && "$TRIGGERING_ACTOR" == "$ACTOR" ]] || { echo "::error::Only the configured human authorizer may dispatch"; exit 1; }
+          gh api "users/$ACTOR" | jq -e --arg id "$AUTHORIZER_ID" '.type == "User" and (.id | tostring) == $id' >/dev/null || { echo "::error::Cannot verify the human dispatcher"; exit 1; }
+          gh api "repos/$REPOSITORY/branches/main" | jq -e '.protected == true' >/dev/null || { echo "::error::Main must be protected"; exit 1; }
+          for environment in staging-authorization staging-foundation-apply; do
+            gh api "repos/$REPOSITORY/environments/$environment" | jq -e '.deployment_branch_policy.custom_branch_policies == true and .deployment_branch_policy.protected_branches == false' >/dev/null || { echo "::error::Cannot verify custom branch protection for $environment"; exit 1; }
+            gh api --paginate --slurp "repos/$REPOSITORY/environments/$environment/deployment-branch-policies" | jq -e '[.[].branch_policies[]] | length == 1 and .[0].name == "main" and .[0].type == "branch"' >/dev/null || { echo "::error::$environment must allow only the main branch"; exit 1; }
+          done
+
+      - name: Validate exact foundation promotion metadata
+        id: metadata
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@046fe30aaf2a9a255aea1b1c5911b3349697a6f2
+        with:
+          verification-mode: terraform-metadata
+          promotion-pr-number: ${{ inputs.promotion-pr-number }}
+          expected-manifest-sha: ${{ inputs.expected-manifest-sha256 }}
+          trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
+          plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          approval-mode: solo
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+
+      - name: Reject every non-foundation target
+        env:
+          KIND: ${{ steps.metadata.outputs.promotion-kind }}
+          LAYER: ${{ steps.metadata.outputs.plan-layer }}
+          ROOT: ${{ steps.metadata.outputs.terraform-root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$KIND" == "terraform" && "$LAYER" == "foundation" && "$ROOT" == "stacks/celoria-industries/staging/foundation" ]] || { echo "::error::Only the exact staging foundation root is supported"; exit 1; }
+
+      - name: Download exact saved plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.metadata.outputs.plan-artifact-id }}
+          path: ${{ runner.temp }}/foundation-apply/plan
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.metadata.outputs.producer-run-id }}
+          digest-mismatch: error
+
+      - name: Download exact signed evidence
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.metadata.outputs.evidence-artifact-id }}
+          path: ${{ runner.temp }}/foundation-apply/evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.metadata.outputs.producer-run-id }}
+          digest-mismatch: error
+
+      - name: Revalidate current authorizations and signed plan bytes
+        id: verified
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@046fe30aaf2a9a255aea1b1c5911b3349697a6f2
+        with:
+          verification-mode: terraform-verification
+          promotion-pr-number: ${{ inputs.promotion-pr-number }}
+          expected-manifest-sha: ${{ inputs.expected-manifest-sha256 }}
+          trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
+          plan-artifact-path: ${{ runner.temp }}/foundation-apply/plan/tfplan
+          evidence-record-path: ${{ runner.temp }}/foundation-apply/evidence/evidence.json
+          evidence-signature-path: ${{ runner.temp }}/foundation-apply/evidence/signature.b64
+          plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          plan-signing-public-key-der-b64: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}
+          approval-mode: solo
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+
+      - name: Require new apply authorizations after the operator cutoff
+        env:
+          VERIFIED: ${{ steps.verified.outputs.verification-result }}
+          NOT_BEFORE: ${{ vars.STAGING_FOUNDATION_APPLY_NOT_BEFORE }}
+          SOURCE_AT: ${{ steps.verified.outputs.solo-source-authorization-created-at }}
+          PROMOTION_AT: ${{ steps.verified.outputs.solo-authorization-created-at }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VERIFIED" == "verified" ]] || { echo "::error::Signed plan acceptance is required"; exit 1; }
+          python3 - <<'PY'
+          import datetime
+          import os
+          cutoff, source, promotion = (
+              datetime.datetime.strptime(os.environ[key], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+              for key in ("NOT_BEFORE", "SOURCE_AT", "PROMOTION_AT")
+          )
+          if not cutoff < source <= promotion <= datetime.datetime.now(datetime.timezone.utc):
+              raise SystemExit("::error::Create new source and promotion authorizations after the protected apply cutoff")
+          PY
+
+      - name: Validate isolated ledger configuration
+        env:
+          ROLE: ${{ vars.STAGING_SOLO_LEDGER_ROLE_ARN }}
+          TABLE: ${{ vars.STAGING_SOLO_LEDGER_TABLE_ARN }}
+          ACCOUNT: ${{ vars.STAGING_SOLO_LEDGER_ACCOUNT_ID }}
+          REGION: ${{ vars.STAGING_SOLO_LEDGER_REGION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACCOUNT" =~ ^[0-9]{12}$ && "$REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Invalid ledger account or region"; exit 1; }
+          [[ "$ROLE" =~ ^arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9+=,.@_/-]+$ && "${BASH_REMATCH[1]}" == "$ACCOUNT" ]] || { echo "::error::Ledger role account mismatch"; exit 1; }
+          [[ "$TABLE" =~ ^arn:aws:dynamodb:([a-z0-9-]+):([0-9]{12}):table/[A-Za-z0-9_.-]{3,255}$ && "${BASH_REMATCH[1]}" == "$REGION" && "${BASH_REMATCH[2]}" == "$ACCOUNT" ]] || { echo "::error::Ledger table account or region mismatch"; exit 1; }
+
+      - name: Assume only the audit ledger role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.STAGING_SOLO_LEDGER_ROLE_ARN }}
+          aws-region: ${{ vars.STAGING_SOLO_LEDGER_REGION }}
+          role-session-name: FoundationAuthorization-${{ github.run_id }}
+          allowed-account-ids: ${{ vars.STAGING_SOLO_LEDGER_ACCOUNT_ID }}
+          unset-current-credentials: true
+
+      - name: Consume authorization exactly once
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@046fe30aaf2a9a255aea1b1c5911b3349697a6f2
+        with:
+          operation: consume-solo
+          promotion-pr-number: ${{ inputs.promotion-pr-number }}
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+          ledger-role-arn: ${{ vars.STAGING_SOLO_LEDGER_ROLE_ARN }}
+          ledger-table-arn: ${{ vars.STAGING_SOLO_LEDGER_TABLE_ARN }}
+          verified-manifest-sha: ${{ steps.verified.outputs.manifest-sha256 }}
+          verified-promotion-head-sha: ${{ steps.verified.outputs.promotion-head-sha }}
+          verified-source-pr-number: ${{ steps.verified.outputs.source-pr-number }}
+          verified-source-head-sha: ${{ steps.verified.outputs.source-pull-request-head-sha }}
+          verified-authorized-at: ${{ steps.verified.outputs.solo-authorization-created-at }}
+          verified-source-authorized-at: ${{ steps.verified.outputs.solo-source-authorization-created-at }}
+          verified-target-resource: ${{ steps.verified.outputs.solo-target-resource }}
+
+      - name: Bind successful consumption to this first attempt
+        id: receipt
+        env:
+          MANIFEST_SHA: ${{ inputs.expected-manifest-sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'receipt=%s:1:%s\n' "$GITHUB_RUN_ID" "$MANIFEST_SHA" >> "$GITHUB_OUTPUT"
+
+  apply:
+    name: Apply only the consumed signed foundation plan
+    needs: consume
+    runs-on: ubuntu-latest
+    environment: staging-foundation-apply
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      id-token: write
+      pull-requests: read
+    steps:
+      - name: Require this dispatch and consumption receipt
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          ATTEMPT: ${{ github.run_attempt }}
+          REPOSITORY: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          AUTHORIZER_ID: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          MODE: ${{ vars.STAGING_APPROVAL_MODE }}
+          ENABLED: ${{ vars.STAGING_FOUNDATION_APPLY_ENABLED }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          MANIFEST_SHA: ${{ inputs.expected-manifest-sha256 }}
+          RECEIPT: ${{ needs.consume.outputs.receipt }}
+          CONSUME_RESULT: ${{ needs.consume.result }}
+          NOT_BEFORE: ${{ vars.STAGING_FOUNDATION_APPLY_NOT_BEFORE }}
+          CONSUMED_NOT_BEFORE: ${{ needs.consume.outputs.not_before }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$REPOSITORY" == "Celoria-Industries/infrastructure-as-code" && "$EVENT" == "workflow_dispatch" && "$REF" == "refs/heads/main" && "$ATTEMPT" == "1" ]] || { echo "::error::Apply requires a new main dispatch, never a rerun"; exit 1; }
+          [[ "$ENABLED" == "true" && "$MODE" == "solo" && "$CONFIRMATION" == "apply-staging-foundation" ]] || { echo "::error::Apply is not explicitly enabled and confirmed"; exit 1; }
+          [[ "$AUTHORIZER_ID" =~ ^[1-9][0-9]*$ && "$ACTOR_ID" == "$AUTHORIZER_ID" && "$TRIGGERING_ACTOR" == "$ACTOR" ]] || { echo "::error::Apply dispatcher does not match the human authorizer"; exit 1; }
+          [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ && "$CONSUME_RESULT" == "success" && "$RECEIPT" == "$GITHUB_RUN_ID:1:$MANIFEST_SHA" && -n "$NOT_BEFORE" && "$NOT_BEFORE" == "$CONSUMED_NOT_BEFORE" ]] || { echo "::error::Missing same-attempt consumption or inconsistent protected cutoff"; exit 1; }
+          gh api "users/$ACTOR" | jq -e --arg id "$AUTHORIZER_ID" '.type == "User" and (.id | tostring) == $id' >/dev/null || { echo "::error::Cannot verify the human dispatcher"; exit 1; }
+          gh api "repos/$REPOSITORY/branches/main" | jq -e '.protected == true' >/dev/null || { echo "::error::Main must be protected"; exit 1; }
+          for environment in staging-authorization staging-foundation-apply; do
+            gh api "repos/$REPOSITORY/environments/$environment" | jq -e '.deployment_branch_policy.custom_branch_policies == true and .deployment_branch_policy.protected_branches == false' >/dev/null || { echo "::error::Cannot verify custom branch protection for $environment"; exit 1; }
+            gh api --paginate --slurp "repos/$REPOSITORY/environments/$environment/deployment-branch-policies" | jq -e '[.[].branch_policies[]] | length == 1 and .[0].name == "main" and .[0].type == "branch"' >/dev/null || { echo "::error::$environment must allow only the main branch"; exit 1; }
+          done
+
+      - name: Download consumed saved plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.consume.outputs.plan_artifact_id }}
+          path: ${{ runner.temp }}/foundation-apply/plan
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.consume.outputs.producer_run_id }}
+          digest-mismatch: error
+
+      - name: Download consumed signed evidence
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.consume.outputs.evidence_artifact_id }}
+          path: ${{ runner.temp }}/foundation-apply/evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.consume.outputs.producer_run_id }}
+          digest-mismatch: error
+
+      - name: Check out only the reviewed merge commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.consume.outputs.source_commit }}
+          persist-credentials: false
+
+      - name: Set up the producer Terraform version
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: 1.10.5
+
+      - name: Revalidate consumed manifest, current authorizations and signature
+        id: verified
+        uses: Celoria-Industries/.github/.github/actions/staging-promotion-gate@046fe30aaf2a9a255aea1b1c5911b3349697a6f2
+        with:
+          verification-mode: terraform-verification
+          promotion-pr-number: ${{ inputs.promotion-pr-number }}
+          expected-manifest-sha: ${{ inputs.expected-manifest-sha256 }}
+          trusted-plan-producer-workflow: ${{ vars.STAGING_TRUSTED_PLAN_WORKFLOW }}
+          plan-artifact-path: ${{ runner.temp }}/foundation-apply/plan/tfplan
+          evidence-record-path: ${{ runner.temp }}/foundation-apply/evidence/evidence.json
+          evidence-signature-path: ${{ runner.temp }}/foundation-apply/evidence/signature.b64
+          plan-target-account-id: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          plan-target-region: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          plan-signing-key-arn: ${{ vars.STAGING_PLAN_SIGNING_KEY_ARN }}
+          plan-signing-public-key-der-b64: ${{ vars.STAGING_PLAN_SIGNING_PUBLIC_KEY_DER_B64 }}
+          approval-mode: solo
+          solo-authorizer-id: ${{ vars.STAGING_SOLO_AUTHORIZER_ID }}
+          solo-max-age-seconds: ${{ vars.STAGING_SOLO_APPROVAL_MAX_AGE_SECONDS }}
+          solo-source-comment-id: ${{ inputs.source-authorization-comment-id }}
+          solo-promotion-comment-id: ${{ inputs.promotion-authorization-comment-id }}
+          solo-target-account-id: ${{ vars.STAGING_SOLO_TARGET_ACCOUNT_ID }}
+          solo-target-region: ${{ vars.STAGING_SOLO_TARGET_REGION }}
+
+      - name: Require fresh foundation acceptance before writer setup
+        env:
+          VERIFIED: ${{ steps.verified.outputs.verification-result }}
+          KIND: ${{ steps.verified.outputs.promotion-kind }}
+          LAYER: ${{ steps.verified.outputs.plan-layer }}
+          ROOT: ${{ steps.verified.outputs.terraform-root }}
+          NOT_BEFORE: ${{ vars.STAGING_FOUNDATION_APPLY_NOT_BEFORE }}
+          SOURCE_AT: ${{ steps.verified.outputs.solo-source-authorization-created-at }}
+          PROMOTION_AT: ${{ steps.verified.outputs.solo-authorization-created-at }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VERIFIED" == "verified" && "$KIND" == "terraform" && "$LAYER" == "foundation" && "$ROOT" == "stacks/celoria-industries/staging/foundation" ]] || { echo "::error::Signed staging foundation acceptance is required"; exit 1; }
+          python3 - <<'PY'
+          import datetime
+          import os
+          cutoff, source, promotion = (
+              datetime.datetime.strptime(os.environ[key], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+              for key in ("NOT_BEFORE", "SOURCE_AT", "PROMOTION_AT")
+          )
+          if not cutoff < source <= promotion <= datetime.datetime.now(datetime.timezone.utc):
+              raise SystemExit("::error::Create new source and promotion authorizations after the protected apply cutoff")
+          PY
+
+      - name: Validate fixed staging writer configuration
+        id: config
+        env:
+          STATE_ROLE: ${{ vars.AWS_ROLE_ARN_STAGING_APPLY }}
+          DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN_STAGING_APPLY }}
+          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET_STAGING }}
+          STATE_REGION: ${{ vars.AWS_REGION }}
+          TARGET_ACCOUNT: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          role_re='^arn:aws:iam::([0-9]{12}):role/[A-Za-z0-9+=,.@_/-]+$'
+          [[ "$TARGET_ACCOUNT" =~ ^[0-9]{12}$ && "$TARGET_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Invalid staging target"; exit 1; }
+          [[ "$STATE_ROLE" =~ $role_re ]] || { echo "::error::Invalid bootstrap state-apply role"; exit 1; }
+          state_account="${BASH_REMATCH[1]}"
+          [[ "$state_account" != "$TARGET_ACCOUNT" ]] || { echo "::error::State and staging accounts must be distinct"; exit 1; }
+          [[ "$DEPLOY_ROLE" =~ $role_re && "${BASH_REMATCH[1]}" == "$TARGET_ACCOUNT" ]] || { echo "::error::Deploy role must match the verified staging account"; exit 1; }
+          [[ "$STATE_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ && "$STATE_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]] || { echo "::error::Invalid bootstrap backend"; exit 1; }
+          printf 'state_account=%s\n' "$state_account" >> "$GITHUB_OUTPUT"
+
+      - name: Assume only the bootstrap state apply role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_STAGING_APPLY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: StagingFoundationApply-${{ github.run_id }}
+          allowed-account-ids: ${{ steps.config.outputs.state_account }}
+          unset-current-credentials: true
+
+      - name: Verify account chain and apply only the signed saved plan
+        env:
+          STATE_ACCOUNT: ${{ steps.config.outputs.state_account }}
+          DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN_STAGING_APPLY }}
+          TARGET_ACCOUNT: ${{ vars.STAGING_PLAN_TARGET_ACCOUNT_ID }}
+          TARGET_REGION: ${{ vars.STAGING_PLAN_TARGET_REGION }}
+          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET_STAGING }}
+          STATE_REGION: ${{ vars.AWS_REGION }}
+          PLAN_PATH: ${{ runner.temp }}/foundation-apply/plan/tfplan
+          TF_IN_AUTOMATION: "true"
+          TF_INPUT: "false"
+        shell: bash
+        run: |
+          set -euo pipefail
+          config="$RUNNER_TEMP/foundation-deploy-config"
+          printf '[profile deploy]\nrole_arn = %s\ncredential_source = Environment\nrole_session_name = foundation-%s\n' "$DEPLOY_ROLE" "$GITHUB_RUN_ID" > "$config"
+          export AWS_CONFIG_FILE="$config"
+          [[ "$(aws sts get-caller-identity --query Account --output text)" == "$STATE_ACCOUNT" ]] || { echo "::error::Wrong bootstrap account"; exit 1; }
+          [[ "$(aws sts get-caller-identity --profile deploy --region "$TARGET_REGION" --query Account --output text)" == "$TARGET_ACCOUNT" ]] || { echo "::error::Wrong staging account"; exit 1; }
+          [[ -f "$PLAN_PATH" ]] || { echo "::error::Verified saved plan is missing"; exit 1; }
+          root=stacks/celoria-industries/staging/foundation
+          terraform -chdir="$root" init -input=false -lockfile=readonly \
+            -backend-config="bucket=$STATE_BUCKET" \
+            -backend-config="key=$root/terraform.tfstate" \
+            -backend-config="region=$STATE_REGION" \
+            -backend-config="use_lockfile=true"
+          terraform -chdir="$root" apply -input=false -lock-timeout=10m "$PLAN_PATH"
+          printf 'Applied the consumed signed foundation plan in run %s, attempt 1.\n' "$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
